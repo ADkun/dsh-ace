@@ -1,0 +1,129 @@
+---
+title: dsh-ace 设计文档
+owner: dsh-ace 维护者
+status: current
+last_reviewed: 2026-10-21
+---
+
+# 设计
+
+## 职责与边界
+
+**结论：dsh-ace 只负责「手册的读、盘、并」三件事，不负责任务执行本身，也不做任何检索/向量化。**
+
+- 管：手册文件生命周期（不存在则初始化）、条目结构与 id 分配、增量操作的事务校验、并发与原子写、Reflector/Curator 的 LLM 调用与提示词、agent 何时复盘的系统提示。
+- 不管：手册内容的质量判断（交给 LLM 与人）、跨工作区的手册共享、手册的自动调度（何时复盘由 agent 按系统提示自行判断）。
+
+## 依赖关系
+
+**结论：运行时只依赖宿主注入的服务与两个宿主包，零第三方运行时依赖。**
+
+| 依赖 | 用途 | 来源 |
+| --- | --- | --- |
+| `ctx.tools` | 注册三个模型可见工具 | 宿主服务（inject 声明） |
+| `ctx.systemPrompt` | 注册「何时复盘」提示段 | 宿主服务（inject 声明） |
+| `ctx.llm` | Reflector/Curator 的单次 LLM 调用 | 宿主服务（inject 声明） |
+| `ctx.workingDirectory` | 相对手册路径 → 会话工作目录 | 宿主服务（inject 声明） |
+| `@deepseek-ai/schemastery` | Config schema（cordis 以 `~standard.vendor` 识别） | 宿主提供的 peer 依赖 |
+| `@deepseek-ai/dsh-tools` | `defineTool` 构造工具定义 | 宿主提供的 peer 依赖 |
+
+Node 内置模块仅 `node:fs`、`node:fs/promises`、`node:path`、`node:os`、`node:crypto`。与已验证模板 dsh-raw-html-v2 同构：`package.json` 以 `dsh.bundle.patch` 指向 `cordis.patch.yml`，后者一行 `insert` 把入口挂进 cordis 层（行 id 必须等于入口导出的 `name`）。
+
+## 核心数据模型
+
+**结论：一切围绕一个 Markdown 文件和三种纯数据形态；LLM 产出只在结构化校验后进入模型。**
+
+| 形态 | 对象 | 说明 |
+| --- | --- | --- |
+| 生命周期型 | `PlaybookEntry` | 条目（id/title/condition/action/rationale/meta/extraLines），随 curate 演化 |
+| 句柄型 | 手册文件路径 | 唯一持久化句柄；相对路径在调用时经会话工作目录解析 |
+| 不可变值 | `ops`（curate 入参） | 操作批：进入 `applyOps` 后先整批校验再应用，校验期间不改副本 |
+| 受控操作 | `withLock` / `writeFileAtomic` | 手册文件只经这两个受控入口变更 |
+
+条目落盘格式与解析规则见 README「首次使用」；条目内人手写的无法识别行挂在 `extraLines` 原样保留。
+
+### 不变量
+
+- I1 不存在把手册整本替换为新文本的代码路径或提示词指令——演化只经 add/update/remove；
+- I2 条目 id 在同一手册内唯一，且新 id 恒为现有最大编号 +1（编号不复用）；
+- I3 `applyOps` 是事务式的：任一操作校验失败则整批拒绝，条目数组保持不变；
+- I4 手册条目数不得超过 `maxEntries`，违反即整批拒绝并在错误信息里给出可合并的旧条目；
+- I5 同一路径上的手册「读-改-写」串行执行（per-path 互斥，仅在单 DSH 进程内有效；多实例共享同一 workspace 时为 last-writer-wins，rename 的原子性保证文件不会写坏），不同路径互不阻塞；
+- I6 手册文件对读者原子可见：只可能是完整旧版或完整新版（临时文件 + rename），不存在半截状态；
+- I7 人手编辑的批注行不因机器写入而丢失（extraLines 往返保真）；
+- I8 LLM 原始输出不得直接写入手册：必须经 `extractJsonObject` 解析且字段类型校验通过。
+
+## 对外接口
+
+**结论：模型可见三个工具，人可见一个配置对象；此外无任何对外面。**
+
+| 接口 | 形态 | 要点 |
+| --- | --- | --- |
+| `ace_playbook` | 工具 | `id` 精确过滤；`query` 以片段（空白/标点拆分，汉字块 2-gram）为 term 对当前条目做 BM25 排序（k1=1.2, b=0.75；idf=log((N-df+0.5)/(df+0.5)+1)；tf 在条目四字段拼接文本上计，实现在 `matchEntries`/`querySegments`，lib/playbook.js）；命中条目按得分降序（同分保持原序），无有效片段或全 0 分时整本兜底；只读，`isConcurrencySafe` 为真 |
+| `ace_reflect` | 工具 | `summary` 必填、`outcome` 可选；LLM 复盘返回候选数组；120s 协作超时 |
+| `ace_curate` | 工具 | `ops` 批量增量；`dedupe` 默认对 add 做 LLM 去重（判 new/update/drop）；互斥锁内 读→去重→校验→原子写 |
+| `Config` | 配置 | 五字段见 README「配置」表 |
+| 系统提示段 `ace-playbook` | order 860 | `autoReflect` 为 false 时不注册 |
+
+模型路由解析链：配置了 `reflectProvider`+`reflectModel` 则覆盖优先；否则 `session.requestHeader().config` → `agent.options`（与会话同模型）；解析不出则报错要求显式配置。
+
+### 设置页：为什么是两个下拉 + 可清空
+
+`reflectProvider` / `reflectModel` 是**成对生效**的：`resolveRoute`（lib/llm.js:17-30）只在两项都非空时才采用覆盖值，只填一项等于没填、静默回落到会话模型。所以设置页不做「一个输入框填 model 全名」的自由文本，而是：
+
+- **分开两个下拉**——provider 与 model 是两个独立字段，语义一一对应，用户不必记住 provider 前缀，也不会把 model 名写错；
+- **model 下拉按 provider 分组**，已选 provider 时只列该组，把「这个 model 属于哪个 provider」变成界面上可见的事实，而不是靠用户拼字符串；
+- **两行都能清空**（面板底部「跟随会话模型（清空）」提交空串，宿主 `validString` 允许空串）——空值就是「跟随会话模型」，与配置默认值一致，不需要「恢复默认」才能回到该状态；
+- **只填一项时显式警告**（model 行下方橙色 `#f0b429`）：两项恰好只有一个非空才出现，用来抵消 `&&` 语义造成的静默回落。
+
+选中即提交（没有「保存」按钮）：选 provider → `POST {reflectProvider}`；选 model 且当前 provider 为空 → **一次 POST 同时提交两项** `{reflectProvider, reflectModel}`（宿主 POST 本来就支持多字段）；否则只提交 `{reflectModel}`。
+
+**模型目录接口**（只读，不落盘、不缓存）：
+
+```
+GET /api/dsh-ace/catalog
+{ ok: true, providers: [ { id, name, models: [ { id, name, description? } ], error? } ] }
+```
+
+数据来自 `ctx.llm.listProviders()`（同步）+ 逐个 `ctx.llm.listModels(id)`（异步），组装逻辑在 `lib/catalog.js`（`buildCatalog`，纯逻辑可测）。**逐个 provider 各自 try/catch 并带 15s 超时**：某个 provider 抛错或卡住，只让它自己的 `models` 为 `[]` 并附一条 `error` 字符串，接口整体仍 `ok: true` —— 设置页其余字段因此永远可用。围栏与 `/settings` 一致（先 `rejectionFor` 做回环同源校验），只认 GET，其他方法 405。宿主还没重启到带这个接口的版本时前端拿到 404，两个下拉面板里显示一行错误提示，不阻塞页面。
+
+### 设置文件位置：为什么跟随 profile
+
+**结论：设置文件属于「某个 profile 的用户选择」，不属于 DSH_HOME 层；解析链以 `profileContext.dir` 为首选，旧口径只作回落。**
+
+旧实现是 `process.env.DSH_PROFILE_DIR || process.env.DSH_HOME || ~/.dsh`，而 `DSH_PROFILE_DIR` 在宿主服务进程里恒为 `undefined`——它只由 `dsh-shell-env` 在每次 shell 工具调用时现塞进子进程（`dsh-shell-env\lib\index.js:90-93`），进程本身没有这个变量。结果所有 profile 共用 `$DSH_HOME/dsh-ace.json` 一份设置。
+
+现在改为 `lib/settings-path.js` 的 `resolveSettingsFile(ctx, env, home)`（纯函数，env/home 注入可测），解析链：
+
+| 优先级 | 来源 | 说明 |
+| --- | --- | --- |
+| ① | `ctx.get('profileContext')?.dir` | 当前 profile 目录，官方惯例 `$DSH_HOME/profiles/<name>`（`dsh-app-boot\lib\index.js:488-497`）；类型定义 `dsh-app-boot\lib\types\profile-context.d.ts:10-25`，声明同文件 `:26-31`「Present only in a profile launched by dsh」 |
+| ② | `DSH_PROFILE_DIR` | 旧口径回落（子进程场景下才有值） |
+| ③ | `DSH_HOME` | 旧口径回落 |
+| ④ | `~/.dsh` | 兜底 |
+
+文件名恒为 `dsh-ace.json`。取值容错：`ctx` 缺失、`ctx.get` 抛错、`profileContext` 不存在、`dir` 为空串或纯空白，一律视为「没有这一级」并继续回落——非 profile 启动的宿主不会因此报错。
+
+**一次性迁移**（`migrateSettingsFile`，`apply()` 初始化处调用一次）：仅当「新位置不存在 + 旧位置存在 + 两者不是同一路径」时，把旧文件内容**原样复制**到新位置，写入口径与 `writeStored` 一致（临时文件 + rename、`mode 0o600`），并记一条 `ctx.logger.info` 说明从哪到哪。**旧文件保留不删**（用户数据，删了不可恢复）；**新位置已存在则绝不覆盖**。迁移失败只 warn，不影响插件启动。
+
+## 非功能红线
+
+**结论：每条红线都能指到载体与依据，改动前逐条对照。**
+
+- 手册只增量演化，无整本重写路径——来源：ACE 方法论（细节磨平问题）——载体：`lib/prompts.js` 两条 system 提示词 + `applyOps` 仅暴露三操作（机检：TESTING 用例）[评]
+- 并发 curate 不写坏手册——来源：验收标准 3——载体：`withLock` per-path Promise 链（机检：withLock 三条用例）[机检]
+- 手册写入原子可见——来源：I6——载体：`writeFileAtomic`（tmp + rename）（机检：读写往返用例）[机检]
+- LLM 输出结构化后才落盘——来源：I8——载体：`extractJsonObject` + 字段过滤（评）[评]
+- 失败不产生半截状态：curate 任一步抛错则手册不变（锁内先校验后写）——载体：`applyOps` 事务校验（机检：事务式用例）[机检]
+- 零第三方运行时依赖、无子进程、无 Python——来源：委派约束——载体：`package.json`（机检：无 dependencies 字段）[人]
+
+## For Agents
+
+- 改 `lib/playbook.js`（纯逻辑）时：保持函数纯度（`applyOps` 不碰 IO），新行为先在 `tests/playbook.test.mjs` 补用例；
+- 改提示词时：守住 I1 措辞（「只输出增量」「禁止整本重写」必须原样保留）；
+- 加工具时：参数/输出都用 per-property spec（type/required/description/enum/items/additionalProperties），照 `lib/index.js` 现有三工具写；每个新引用的 DSH API 在代码注释里注明 checkout 出处；
+- 别动：`cordis.patch.yml` 的 id/name 配对；`inject` 数组只声明真正用到的服务。
+
+## 测试与验证
+
+用例总表、运行方式与未验证清单见 [TESTING.md](TESTING.md)。

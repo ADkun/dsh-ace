@@ -1,0 +1,7 @@
+# dsh-ace 的 bundle 层：把插件挂进 cordis 全局层。
+# 结构与 dsh-raw-html-v2 / dsh-bigger-choice / adg-skill-inject 同款：
+# 顶层一行 insert，行 id 必须等于 lib/index.js 导出的 name（插件的稳定 cordis 名），
+# name 是包名（无版本）。工具注册与系统提示段都由插件自己在 apply() 里完成。
+- insert:
+    - id: dsh-ace
+      name: dsh-ace

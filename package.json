@@ -1,0 +1,79 @@
+{
+  "name": "dsh-ace",
+  "version": "0.3.0",
+  "description": "ACE（Agentic Context Engineering）原生 DSH 插件：把操作手册（playbook）当作可进化资产——ace_reflect 复盘任务轨迹提炼候选经验，ace_curate 以增量方式并入 Markdown 手册（增/改/删 + 去重），ace_playbook 供模型随时查阅。手册默认存 <workspace>/.ace/playbook.md，人可直接翻看编辑。不训练模型、不改权重，纯提示与文件。",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "ace",
+    "agentic-context-engineering",
+    "playbook",
+    "self-improving"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./lib/playbook.js": "./lib/playbook.js",
+    "./lib/prompts.js": "./lib/prompts.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "lib/*.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "AGENTS.md",
+    "DESIGN.md",
+    "TESTING.md",
+    "tests"
+  ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "license": "MIT",
+  "author": "ADkun",
+  "homepage": "https://github.com/ADkun/dsh-ace#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ADkun/dsh-ace.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ADkun/dsh-ace/issues"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": false
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": false
+    }
+  },
+  "optionalDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  }
+}
