@@ -103,6 +103,88 @@ GET /api/dsh-ace/catalog
 
 数据来自 `ctx.llm.listProviders()`（同步）+ 逐个 `ctx.llm.listModels(id)`（异步），组装逻辑在 `lib/catalog.js`（`buildCatalog`，纯逻辑可测）。**逐个 provider 各自 try/catch 并带 15s 超时**：某个 provider 抛错或卡住，只让它自己的 `models` 为 `[]` 并附一条 `error` 字符串，接口整体仍 `ok: true` —— 设置页其余字段因此永远可用。围栏与 `/settings` 一致（先 `rejectionFor` 做回环同源校验），只认 GET，其他方法 405。宿主还没重启到带这个接口的版本时前端拿到 404，两个下拉面板里显示一行错误提示，不阻塞页面。
 
+### 设置页顶部的只读统计：为什么是「观察者」
+
+**结论：统计块是纯观察者，另开一条只读端点，聚合逻辑抽成纯函数；它不参与任何写入路径。**
+
+| 决定 | 理由 |
+| --- | --- |
+| 新增 `GET /api/dsh-ace/stats`，不复用 `/settings` | `/settings` 的语义是「可写配置的读/写」，往里塞统计会让一条写路径的返回体长出只读字段；另开一条只读分支与 `/catalog`、`/inbox` 并列，围栏（`rejectionFor`）与 405 口径完全一致 |
+| 聚合逻辑放 `lib/stats.js` 的纯函数 | `summarizePlaybook(text, opts)` 只吃字符串与注入的 `now`，单测可直接喂样例手册；`readPlaybookStats`/`collectPlaybookStats` 只 stat + readFile，**不写盘、不加锁**，因此不碰 `withLock`/`writeFileAtomic`/`commit.js`/`merge.js` 任何一条写路径（红线 ②不受影响） |
+| 一律 `ok: true` + `reason` 降级，绝不 500 | 与 `/inbox` 同款静默降级：相对路径在 HTTP 面没有会话工作目录（`resolvePlaybookFile` 抛 `RELATIVE_PATH_NEEDS_SESSION`，lib/playbook-path.js:52-53）、文件不存在、文件为空、读盘失败，四种都返回结构相同的空态 + 一个 `reason`，设置页其余字段照常可用 |
+| 正文字符数口径 = `title+condition+action+rationale` | `parsePlaybook` 已把 `- 条件：` 这类 Markdown 标记剥掉、元数据行单独收进 `meta`（lib/playbook.js:43-47、67-113），因此 `entryTextChars` 量的就是正文本身，不含标记与元数据 |
+| 来源构成只显示 `auto=true` 占比 | `helpful`/`harmful` 目前没有任何写入方、恒为 0（lib/playbook.js:49-61 只解析不自增），展示它们等于展示噪声；`auto` 有真实语义（自动归档落盘的条目），且当前是 0 / 35，页面照常显示 0% 并附一句「自动归档尚未落盘过」 |
+| 时间分布 = 纯 CSS 迷你条形图 | 不引图表库（红线 ⑤：不新增运行时依赖，浏览器半边保持只有 `React.createElement` + 本文件 CSS）；14 行日期 + 一根宽度按比例的内联 `style` 百分比条，**不动态注入 CSS 规则** |
+| 打开页面拉一次 + 区块自带「刷新」+ 保存成功后重拉 | 统计是读操作，不需要实时；但改了 `playbookPath`/`maxEntries` 之后数字会立刻过期，所以保存成功后顺手重拉一次，避免用户以为没生效 |
+
+接口形状（只读、不落盘、不缓存，围栏与 `/settings` 一致，只认 GET，其他方法 405）：
+
+```
+GET /api/dsh-ace/stats
+{
+  ok: true,
+  reason: null | 'needs-session' | 'missing' | 'no-entries' | 'unreadable',
+  generatedAt: 'YYYY-MM-DD HH:mm',
+  pathKind: 'shared' | 'absolute' | 'relative' | null,
+  playbookPath: string | null,          // 解析后的手册路径：成功时是绝对路径（空串配置即本机共享层，与 file 相同）；
+                                        // 只有 needs-session 空态下才回显配置里的原值（如 'docs/playbook.md'）
+  file: string | null,                  // 解析出的手册绝对路径（文件不存在时仍带着这个路径）；只有路径解析失败（needs-session）时为 null
+  scale: { entries, maxEntries, textChars, bytes, mtime },  // mtime 在无文件/空态时为 null；maxEntries 仅纯函数调用未传时为 null，HTTP 面恒为配置值
+  source: { auto, total, autoRatio },   // autoRatio ∈ [0,1]
+  windowDays: 14,
+  dailyMax: number,
+  daily: [ { date: 'YYYY-MM-DD', count } ],   // 固定 14 行，最早在前
+  recent: [ { id, title, updated } ]          // 最多 5 条，按 updated 倒序
+}
+```
+
+### 三页标签：为什么是隐藏而不是卸载
+
+**结论：三个页面始终都在 DOM 里，未选中的只挂 `[hidden]`；切页只切换可见性，不动组件树。**
+
+| 决定 | 理由 |
+| --- | --- |
+| 三个 `.ace-page`（`ace-page-stats` / `ace-page-settings` / `ace-page-entries`）始终渲染，未选中的那一个挂 `hidden` | 卸载等于丢状态：设置页填了一半的 draft 会被重置成服务端值、记录页的搜索词/页码/展开行全部归零。保持挂载，切回来就是原样 |
+| 标签栏放标题之下、内容之上，三个 `role="tab"` 按钮 + 三块 `role="tabpanel"` | 语义结构照 WAI-ARIA tabs 写（`aria-selected` / `aria-controls` / `aria-labelledby`），宿主与读屏器都不必猜 |
+| 默认 `tabId = 'stats'`，刻意不写 `localStorage` | 刷新回到统计页是明确要求；记住上次的页会让「打开设置页」变成不可预期的落点 |
+| 不引路由库、不加 URL hash 同步 | 红线 ⑤（不新增运行时依赖）：浏览器半边只有 `React.createElement` + 本文件 CSS；页面本来就只有三个、且不需要深链接 |
+| `[hidden]` 由一条 `.ace-page[hidden]{display:none}` 兜底 | `hidden` 属性的默认样式可能被别的 `display` 规则盖掉（这里就有 `display:flex` 的页面块）；显式写一条 CSS，隐藏不依赖属性选择器的运气 |
+| 标签栏上接 ←/→ 循环、Home/End 跳首末，配 roving tabindex | 只有选中的 tab 进 tab 序（`tabIndex=0`，其余 `-1`），所以切页必须靠 tablist 上的方向键——否则键盘用户停在原地出不去；`moveTab` 挪焦点前做节点存在性守卫，测试/SSR 无 DOM 时只不挪焦点、不抛错 |
+
+### 记录列表页：为什么另开 `/entries` 而不扩 `/stats`
+
+**结论：记录页要的是全量逐条清单，`/stats` 是聚合视图；另开一条同构的只读端点，围栏与降级口径照抄。**
+
+| 决定 | 理由 |
+| --- | --- |
+| 新增 `GET /api/dsh-ace/entries`，不往 `/stats` 里塞条目数组 | `/stats` 是聚合视图（`scale`/`source`/`daily`/`recent` 全是汇总，`recent` 只给 5 条）；记录页要全量逐条 + 搜索 + 排序 + 分页，混进汇总体会让一条观察者端点的两种用途互相牵制 |
+| 摊平逻辑放 `lib/entries.js` 的纯函数（`toEntry` / `collectEntries`） | `toEntry(raw)` 把 `parsePlaybook` 的一条摊平成固定 10 字段（缺字段给空串/0/false），`collectEntries` 只吃解析结果或全文；单测可直接喂样例手册。`readPlaybookEntries` 只 `stat` + `readFile`，**不写盘、不加锁**，不碰 `withLock`/`writeFileAtomic`/`commit.js`/`merge.js` 任何写路径（红线 ②） |
+| 围栏与 405 口径照抄 `/catalog` / `/inbox` / `/stats` | 同一个 prefix handler 里先 `rejectionFor(req, ctx.get('connection'))` 做回环同源校验，再 `method !== 'GET'` 回 405；四条只读端点共用一套入口，不新增一套鉴权写法 |
+| 失败一律 `ok: true` + `reason` 降级，绝不 500 | `missing`（文件还不存在）/ `needs-session`（相对路径在 HTTP 面无会话工作目录，`resolvePlaybookFile` 抛 `RELATIVE_PATH_NEEDS_SESSION`）/ `unreadable`（读盘失败），三种都是结构化空态；`reason` 三分派，页面按 reason 渲染不同文案，不把降级当崩溃 |
+| 降级体与成功体**同形** | 成功体 6 键（`ok`/`entries`/`total`/`maxEntries`/`pathKind`/`playbookPath`），降级体只多一个 `reason`；旧版这里只发 5 键的 `emptyEntries`，客户端拿不到 `pathKind` 就只能猜 |
+| 排序与搜索放客户端 | 数据量上限就是 `maxEntries`（默认 100、硬上限 1000），全量一次取回本地过滤 + 排序，比让服务端做 `?q=&sort=&page=` 参数简单得多，也省掉一套服务端分页语义 |
+| 懒加载：第一次切到该页才发请求 | 记录页不是默认页，页面打开时不请求；`handled` ref 记已处理的 `reloadToken`，切走再回来 `active` 变真但 `reloadToken` 没变 → 不重复请求，点「刷新」才重拉 |
+
+接口形状（只读、不落盘、不缓存，围栏与 `/stats` 一致，只认 GET，其他方法 405）：
+
+```
+GET /api/dsh-ace/entries
+{
+  ok: true,
+  reason: null | 'missing' | 'needs-session' | 'unreadable',  // 只有降级体带这一键（成功体不带）
+  entries: [ {                // 全量逐条，字段顺序即契约：正文缺失给空串、auto 恒为布尔、helpful/harmful 恒为数字
+    id, title, condition, action, rationale,
+    auto, created, updated, helpful, harmful
+  } ],
+  total: number,
+  maxEntries: number | null,  // 配置值原样透传；非有限数才为 null，HTTP 面恒为配置值
+  pathKind: 'shared' | 'absolute' | 'relative',  // 只看配置值的形态，不需要会话上下文
+  playbookPath: string        // 解析后的手册绝对路径（空串配置即本机共享层）；只有 needs-session 空态下回显配置原值
+}
+```
+
+页面侧固定 20 条/页，搜索对 `id`/`title`/`condition`/`action`/`rationale` 五字段做大小写不敏感子串匹配，编号列按数字比较（`ace-2` 在 `ace-10` 之前，不是字典序），更新日期列按 `YYYY-MM-DD` 字符串比较。
+
 ### 手册文件位置：默认本机共享层
 
 **结论：手册默认只有一本、放在 `<DSH home>/ace/playbook.md`（本机即 `C:\Users\adkun\.dsh\ace\playbook.md`），跨工作区共用；填相对路径才退化成该工作区私有。**

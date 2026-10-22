@@ -22,6 +22,11 @@ window.__ModuleLoader__.load({
     const CATALOG_ROUTE = '/api/dsh-ace/catalog';
     // 待合并复审列表（宿主 lib/index.js 的 GET /inbox）：只读，失败时静默降级。
     const INBOX_ROUTE = '/api/dsh-ace/inbox';
+    // 手册统计（宿主 lib/index.js 的 GET /stats）：只读，失败时静默降级成一行灰字。
+    const STATS_ROUTE = '/api/dsh-ace/stats';
+    // 手册条目清单（宿主 lib/index.js 的 GET /entries，数据源 lib/entries.js）：只读，
+    // 记录页懒加载 —— 第一次切到记录页才拉，切走再回来不重复请求。
+    const ENTRIES_ROUTE = '/api/dsh-ace/entries';
     const inject = ['slots', 'locale'];
 
     const zh = {
@@ -50,9 +55,8 @@ window.__ModuleLoader__.load({
       catalogLoading: '正在读取模型目录…',
       catalogFailed: '模型目录读取失败：宿主可能还没重启（其余字段照常可用）',
       warnPair: '只有 provider 与 model 两项都填才生效；只填一项会静默回落到会话模型。',
-      maxEntriesPlaceholder: '100',
       fieldMaxEntries: '手册容量上限',
-      fieldMaxEntriesDesc: '超出后 ace_curate 整批拒绝，并提示先合并旧条目（默认 100，可填 1–1000）',
+      fieldMaxEntriesDesc: '超出后 ace_curate 整批拒绝，并提示先合并旧条目（默认 {d}，可填 {min}–{max}）',
       fieldAutoRecap: '自动归档经验',
       fieldAutoRecapDesc: '回合真正结束时由插件后台复盘并写入手册，不依赖模型主动调用',
       fieldAutoRecapThreshold: '自动归档触发门槛',
@@ -64,9 +68,62 @@ window.__ModuleLoader__.load({
       inboxTitle: '待合并复审',
       inboxEmpty: '没有待合并的条目',
       inboxHint: '在对话里输入 /ace review，模型会逐对读出两条全文并起草合并措辞',
-      inboxFull: '待合并已满（20 条），自动归档已暂停新增，请先清理',
+      inboxFull: '待合并已满（{n} 条），自动归档已暂停新增，请先清理',
       inboxUnavailable: '待合并列表不可用：宿主可能还没重启',
       inboxRatio: '相似度',
+      statsTitle: '手册统计',
+      statsRefresh: '刷新',
+      statsLoading: '正在统计手册…',
+      statsUnavailable: '统计不可用：宿主可能还没重启',
+      statsEntries: '条目',
+      statsTextChars: '正文字符',
+      statsBytes: '文件字节',
+      statsMtime: '最后写入',
+      statsPath: '手册路径',
+      statsSource: '来源构成',
+      statsAuto: '自动归档',
+      statsAutoNone: '自动归档尚未落盘过',
+      // {n} 由服务端 /stats 的 windowDays 填入（缺字段回退 14）。
+      statsDaily: '最近 {n} 天更新',
+      statsDailyEmpty: '最近 {n} 天没有条目更新',
+      statsRecent: '最近更新',
+      statsRecentEmpty: '还没有条目',
+      statsGeneratedAt: '统计于',
+      statsReasonNeedsSession: '该路径需要会话上下文，暂无法统计',
+      statsReasonMissing: '手册文件还不存在，暂无可统计内容',
+      statsReasonUnreadable: '手册文件读取失败，暂无法统计',
+      statsReasonNoEntries: '手册里还没有条目',
+      // —— 三页导航（统计 / 设置 / 记录）——
+      tabStats: '统计',
+      tabSettings: '设置',
+      tabEntries: '记录',
+      // —— 记录页（GET /entries，只读）——
+      entriesTitle: '手册条目',
+      entriesRefresh: '刷新',
+      entriesLoading: '正在读取手册条目…',
+      entriesFailed: '条目读取失败：宿主可能还没重启（其余页面照常可用）',
+      // 服务端降级 reason 三分派：missing / needs-session 是「还没到能读」的正常状态，
+      // 只有 unreadable 才是读盘失败。三者文案一一对应，绝不共用（R2 缺陷）。
+      entriesReasonMissing: '手册尚未创建，还没有任何记录',
+      entriesReasonNeedsSession: '手册配置为相对路径，在无会话的 HTTP 面无法定位',
+      entriesReasonUnreadable: '手册文件读取失败',
+      entriesEmpty: '手册里还没有条目',
+      entriesSearchPlaceholder: '搜索编号 / 标题 / 条件 / 做法 / 依据…',
+      entriesCount: '共 {n} 条 / 上限 {m} 条',
+      entriesNoMatch: '没有匹配的条目',
+      entriesColId: '编号',
+      entriesColTitle: '标题',
+      entriesColUpdated: '更新日期',
+      entriesColSource: '来源',
+      entriesAuto: '自动归档',
+      entriesManual: '手写',
+      entriesCondition: '条件',
+      entriesAction: '做法',
+      entriesRationale: '依据',
+      entriesRationaleEmpty: '（未填写依据）',
+      entriesPage: '第 {x} / {y} 页',
+      entriesPrev: '上一页',
+      entriesNext: '下一页',
       on: '开',
       off: '关',
       saved: '已保存',
@@ -104,9 +161,8 @@ window.__ModuleLoader__.load({
       catalogLoading: 'Loading the model catalog…',
       catalogFailed: 'Could not load the model catalog: the host may not have restarted yet (other fields still work)',
       warnPair: 'The override only applies when both provider and model are set; with just one set it silently falls back to the session model.',
-      maxEntriesPlaceholder: '100',
       fieldMaxEntries: 'Playbook capacity',
-      fieldMaxEntriesDesc: 'ace_curate rejects whole batches beyond this and asks to merge old entries first (default 100, 1–1000)',
+      fieldMaxEntriesDesc: 'ace_curate rejects whole batches beyond this and asks to merge old entries first (default {d}, {min}–{max})',
       fieldAutoRecap: 'Archive experience automatically',
       fieldAutoRecapDesc: 'Reflect and write into the playbook in the background once a turn truly ends, without relying on the model calling it',
       fieldAutoRecapThreshold: 'Auto-archive trigger threshold',
@@ -118,9 +174,59 @@ window.__ModuleLoader__.load({
       inboxTitle: 'Pending merges',
       inboxEmpty: 'No entries are waiting to be merged',
       inboxHint: 'Type /ace review in the conversation and the model reads both entries in full and drafts the merge wording',
-      inboxFull: 'The pending-merge list is full (20 entries): auto-archiving has paused. Please clean up first',
+      inboxFull: 'The pending-merge list is full ({n} entries): auto-archiving has paused. Please clean up first',
       inboxUnavailable: 'The pending-merge list is unavailable: the host may not have restarted yet',
       inboxRatio: 'Similarity',
+      statsTitle: 'Playbook stats',
+      statsRefresh: 'Refresh',
+      statsLoading: 'Counting the playbook…',
+      statsUnavailable: 'Stats unavailable: the host may not have restarted yet',
+      statsEntries: 'Entries',
+      statsTextChars: 'Body chars',
+      statsBytes: 'File bytes',
+      statsMtime: 'Last write',
+      statsPath: 'Playbook path',
+      statsSource: 'Origin',
+      statsAuto: 'Auto-archived',
+      statsAutoNone: 'Nothing has been auto-archived yet',
+      statsDaily: 'Updates in the last {n} days',
+      statsDailyEmpty: 'No entry updated in the last {n} days',
+      statsRecent: 'Recently updated',
+      statsRecentEmpty: 'No entries yet',
+      statsGeneratedAt: 'Counted at',
+      statsReasonNeedsSession: 'This path needs a session context, so it cannot be counted here',
+      statsReasonMissing: 'The playbook file does not exist yet: nothing to count',
+      statsReasonUnreadable: 'The playbook file could not be read: stats unavailable',
+      statsReasonNoEntries: 'The playbook has no entries yet',
+      // —— Three tabs (stats / settings / entries) ——
+      tabStats: 'Stats',
+      tabSettings: 'Settings',
+      tabEntries: 'Entries',
+      // —— Entries page (GET /entries, read-only) ——
+      entriesTitle: 'Playbook entries',
+      entriesRefresh: 'Refresh',
+      entriesLoading: 'Loading playbook entries…',
+      entriesFailed: 'Could not load entries: the host may not have restarted yet (the other tabs still work)',
+      entriesReasonMissing: 'The playbook has not been created yet: there are no records',
+      entriesReasonNeedsSession: 'The playbook path is relative and cannot be located on the HTTP surface (no session working directory)',
+      entriesReasonUnreadable: 'The playbook file could not be read',
+      entriesEmpty: 'The playbook has no entries yet',
+      entriesSearchPlaceholder: 'Search id / title / condition / action / rationale…',
+      entriesCount: '{n} total / {m} max',
+      entriesNoMatch: 'No matching entries',
+      entriesColId: 'Id',
+      entriesColTitle: 'Title',
+      entriesColUpdated: 'Updated',
+      entriesColSource: 'Origin',
+      entriesAuto: 'Auto-archived',
+      entriesManual: 'Written by hand',
+      entriesCondition: 'Condition',
+      entriesAction: 'Action',
+      entriesRationale: 'Rationale',
+      entriesRationaleEmpty: '(no rationale)',
+      entriesPage: 'Page {x} / {y}',
+      entriesPrev: 'Previous',
+      entriesNext: 'Next',
       on: 'On',
       off: 'Off',
       saved: 'Saved',
@@ -196,16 +302,93 @@ window.__ModuleLoader__.load({
       '.ace-inbox-title2{color:#eaf2fb}',
       '.ace-inbox-arrow{color:#7d8fa1;padding:0 4px}',
       '.ace-inbox-ratio{font-size:10px;color:#7d8fa1;padding-top:2px}',
+      // —— 手册统计区块（只读）——
+      '.ace-stats{padding:4px 0 8px;border-top:1px solid #1a2430;margin-bottom:6px}',
+      '.ace-stats-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 2px}',
+      '.ace-stats-title{font-size:13px;font-weight:600;color:#eaf2fb}',
+      '.ace-stats-btn{font-size:11px;color:#9fb2c5;background:#131a22;border:1px solid #263140;border-radius:6px;padding:3px 9px;cursor:pointer}',
+      '.ace-stats-btn:hover{color:#2dd4bf;border-color:#1d3a38}',
+      '.ace-stats-note{font-size:11px;color:#7d8fa1;line-height:1.6;padding:2px 0 4px}',
+      '.ace-stats-grid{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}',
+      '.ace-stats-cell{background:#131a22;border:1px solid #263140;border-radius:8px;padding:6px 10px;min-width:104px}',
+      '.ace-stats-k{font-size:10px;color:#7d8fa1;letter-spacing:.04em}',
+      '.ace-stats-v{font-size:13px;color:#eaf2fb;padding-top:2px}',
+      '.ace-stats-acc{color:#2dd4bf}',
+      '.ace-stats-path{font-size:10px;color:#7d8fa1;word-break:break-all;padding:0 0 6px}',
+      '.ace-stats-sub{font-size:11px;color:#8fa1b3;margin:10px 0 4px;letter-spacing:.04em}',
+      '.ace-stats-daily{display:flex;flex-direction:column;gap:2px;margin:0 0 4px}',
+      '.ace-stats-day{display:flex;align-items:center;gap:8px;font-size:10px;color:#7d8fa1}',
+      '.ace-stats-day-label{width:64px;flex:0 0 64px;color:#7d8fa1}',
+      '.ace-stats-bar{flex:1 1 auto;height:6px;background:#0f1720;border:1px solid #1a2430;border-radius:3px;overflow:hidden}',
+      // display:block 是必须的：.ace-stats-bar 不是 flex 容器，内联 <span> 上的 width/height
+      // 会被浏览器直接忽略（这正是「条形恒空」的根因）。这里选给填充块加 display:block，
+      // 而不是把 .ace-stats-bar 改成 display:flex —— 轨道只是 .ace-stats-day（flex）的 flex item，
+      // 它本身不需要 flex 上下文；只改填充块的 display 是最小改动，也不会动到 6px 轨道高度的盒模型。
+      '.ace-stats-bar-fill{display:block;height:100%;background:#2dd4bf;border-radius:2px}',
+      '.ace-stats-day-count{width:20px;flex:0 0 20px;text-align:right;color:#9fb2c5}',
+      '.ace-stats-recent{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px}',
+      '.ace-stats-recent-item{font-size:11px;color:#dce6f1;display:flex;gap:8px;align-items:baseline}',
+      '.ace-stats-id{color:#5eead4;flex:0 0 auto}',
+      '.ace-stats-recent-title{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#eaf2fb}',
+      '.ace-stats-recent-date{flex:0 0 auto;color:#7d8fa1;font-size:10px}',
+      // —— 三页导航 ——
+      '.ace-tabs{display:flex;flex-direction:row;gap:4px;margin:12px 0 4px;border-bottom:1px solid #1a2430}',
+      '.ace-tab{font-size:12px;color:#9fb2c5;background:transparent;border:none;border-bottom:2px solid transparent;padding:6px 12px;margin-bottom:-1px;cursor:pointer;font-family:inherit}',
+      '.ace-tab:hover{color:#dce6f1}',
+      '.ace-tab.is-active{color:#2dd4bf;border-bottom-color:#2dd4bf;background:#0f1a1a}',
+      // 未选中的页面用 [hidden] 隐藏（display:none 显式写出来，避免被其它 display 规则盖掉）。
+      // 三个页面始终都在树里，只是被藏起来 —— 组件状态因此不会被卸载清空。
+      '.ace-page[hidden]{display:none}',
+      // —— 记录页（只读条目清单）——
+      '.ace-entries{padding:4px 0 8px}',
+      '.ace-entries-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 4px}',
+      '.ace-entries-btn{font-size:11px;color:#9fb2c5;background:#131a22;border:1px solid #263140;border-radius:6px;padding:3px 9px;cursor:pointer;font-family:inherit}',
+      '.ace-entries-btn:hover{color:#2dd4bf;border-color:#1d3a38}',
+      '.ace-entries-title{font-size:13px;font-weight:600;color:#eaf2fb}',
+      '.ace-entries-search{width:100%;box-sizing:border-box;font-family:inherit;font-size:12px;color:#dce6f1;background:#0f1720;border:1px solid #263140;border-radius:6px;padding:5px 8px;margin:2px 0 6px}',
+      '.ace-entries-search::placeholder{color:#55677a}',
+      '.ace-entries-count{font-size:10px;color:#7d8fa1;padding:0 0 6px}',
+      '.ace-entries-head-row{display:flex;align-items:center;gap:8px;font-size:10px;color:#7d8fa1;letter-spacing:.04em;border-bottom:1px solid #1a2430;padding:4px 0}',
+      '.ace-entries-sort{font-size:10px;color:#9fb2c5;background:transparent;border:none;padding:0;cursor:pointer;font-family:inherit;letter-spacing:.04em}',
+      '.ace-entries-sort:hover{color:#2dd4bf}',
+      '.ace-entries-sort.is-active{color:#2dd4bf}',
+      '.ace-entries-list{margin:0;padding:0;list-style:none}',
+      '.ace-entries-row{display:flex;align-items:center;gap:8px;font-size:11px;color:#dce6f1;padding:4px 0;border-bottom:1px solid #131a22;cursor:pointer}',
+      '.ace-entries-row:hover{background:#131a22}',
+      '.ace-entries-row-id{flex:0 0 64px;color:#5eead4}',
+      '.ace-entries-row-title{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#eaf2fb}',
+      '.ace-entries-row-date{flex:0 0 84px;color:#7d8fa1;font-size:10px}',
+      '.ace-entries-row-source{flex:0 0 auto;font-size:10px;color:#9fb2c5;border:1px solid #263140;border-radius:4px;padding:1px 6px}',
+      '.ace-entries-row-source.is-auto{color:#2dd4bf;border-color:#1d3a38}',
+      '.ace-entries-detail{padding:2px 0 8px 72px;font-size:11px;color:#9fb2c5;line-height:1.6}',
+      '.ace-entries-detail-block{margin:2px 0 4px}',
+      '.ace-entries-detail-k{color:#7d8fa1;font-size:10px;letter-spacing:.04em}',
+      '.ace-entries-detail-v{color:#c7d5e2}',
+      '.ace-entries-detail-empty{color:#5d6f82;font-style:italic}',
+      '.ace-entries-pager{display:flex;align-items:center;gap:8px;padding:8px 0 0}',
+      '.ace-entries-pager-btn{font-size:11px;color:#9fb2c5;background:#131a22;border:1px solid #263140;border-radius:6px;padding:3px 9px;cursor:pointer;font-family:inherit}',
+      '.ace-entries-pager-btn:hover:not(:disabled){color:#2dd4bf;border-color:#1d3a38}',
+      '.ace-entries-pager-btn:disabled{opacity:.45;cursor:default}',
+      '.ace-entries-pager-btn.is-active{color:#2dd4bf;border-color:#1d3a38}',
+      '.ace-entries-pager-text{font-size:10px;color:#7d8fa1}',
+      '.ace-entries-note{font-size:11px;color:#7d8fa1;line-height:1.6;padding:2px 0 4px}',
     ].join('\n');
 
+    /**
+     * 开关。
+     * 可访问名必须**恒定是字段名**（由调用方传 label）：旧实现把 onText/offText（"开"/"关"）
+     * 当 aria-label，读屏只会念「开，开关」而且名字随状态变化，听不出是哪一项设置。
+     * 现在名字只由 label 决定，开关状态只走 aria-checked；title 仍给鼠标用户看当前状态。
+     */
     function Switch(props) {
-      const { checked, onChange, onText, offText } = props;
+      const { checked, onChange, label, onText, offText, id } = props;
       return h('div', {
         className: 'ace-set-switch',
+        id: id || undefined,
         role: 'switch',
         tabIndex: 0,
         'aria-checked': checked ? 'true' : 'false',
-        'aria-label': checked ? onText : offText,
+        'aria-label': label || undefined,
         title: checked ? onText : offText,
         onClick: () => onChange(!checked),
         onKeyDown: (e) => {
@@ -214,12 +397,26 @@ window.__ModuleLoader__.load({
       }, h('span', { className: 'ace-set-knob' }));
     }
 
+    /**
+     * 一行设置：左侧 label + 说明，右侧控件。
+     * 控件的可访问名与 label 的关联有两条路（都做，能用的场景都覆盖）：
+     * - 控件自带 id（input / Switch）：label 用原生 for 指向它；
+     * - 没有 id 的控件（ModelPicker 这种复合组件）：label 侧挂 aria-labelledby，
+     *   并把生成的 id 透给控件自己的 aria-label 承载元素。
+     */
     function FieldRow(props) {
-      const { label, desc, control } = props;
+      const { label, desc, control, controlId } = props;
+      // 复合控件（ModelPicker 这种没有原生 id 的）自己拿不到 labelId：
+      // 调用点显式传 pickerId / labelId（两者都由 controlId 推出），此组件只负责 label 侧。
+      const labelId = controlId ? controlId + '-label' : undefined;
       return h('div', { className: 'ace-set-row' },
         h('div', null,
-          h('div', { className: 'ace-set-label' }, label),
-          h('div', { className: 'ace-set-desc' }, desc)),
+          h('label', {
+            className: 'ace-set-label',
+            id: labelId,
+            htmlFor: controlId || undefined,
+          }, label),
+          h('div', { className: 'ace-set-desc', id: controlId ? controlId + '-desc' : undefined }, desc)),
         control);
     }
 
@@ -238,11 +435,14 @@ window.__ModuleLoader__.load({
      *   errorText          目录读取失败时的错误行（有则不画列表）
      *   loading            目录读取中的提示
      *   onPick(item) / onClear()
+     *   ariaLabel          可访问名（由 FieldRow 的 label 传下来：读屏听得出是哪一项设置）
+     *   pickerId           触发按钮的 id（FieldRow 的 htmlFor 指向它，建立 label 关联）
+     *   labelId            FieldRow 的 label id（按钮用 aria-labelledby 再兜一层）
      */
     function ModelPicker(props) {
       const {
         value, groups, placeholder, searchPlaceholder, noMatchText, clearText, errorText, loading,
-        onPick, onClear,
+        onPick, onClear, ariaLabel, pickerId, labelId,
       } = props;
       const [open, setOpen] = React.useState(false);
       const [query, setQuery] = React.useState('');
@@ -331,8 +531,11 @@ window.__ModuleLoader__.load({
         h('button', {
           type: 'button',
           className: 'ace-pick-trigger',
+          id: pickerId || undefined,
           'aria-haspopup': 'listbox',
           'aria-expanded': open ? 'true' : 'false',
+          'aria-label': ariaLabel || undefined,
+          'aria-labelledby': labelId || undefined,
           onClick: () => setOpen((wasOpen) => !wasOpen),
         },
           h('span', { className: 'ace-pick-value' + (value ? '' : ' is-empty') }, value || placeholder),
@@ -386,6 +589,391 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // —— 手册统计区块（只读）——
+    // 数据来自宿主 GET /api/dsh-ace/stats（lib/index.js 的 /stats 分支，聚合逻辑在 lib/stats.js）。
+    // 失败（宿主还没重启 → 404）只把这一区块变成一行灰字，其余字段照常可用：
+    // 范式与上面的 catalog / inbox 一致，绝不让整页报错。
+    const STATS_REASON_KEYS = {
+      'needs-session': 'statsReasonNeedsSession',
+      missing: 'statsReasonMissing',
+      unreadable: 'statsReasonUnreadable',
+      'no-entries': 'statsReasonNoEntries',
+    };
+
+    /** 空态文案：reason 有映射就用它，否则回落到一行通用说明。 */
+    function statsReasonText(t, reason) {
+      const key = STATS_REASON_KEYS[String(reason ?? '')];
+      return t(key ?? 'statsReasonNoEntries');
+    }
+
+    /** 'YYYY-MM-DD' → 'MM-DD'（条形图左侧窄列，省宽度）。 */
+    function shortDay(date) {
+      const text = String(date ?? '');
+      return text.length >= 10 ? text.slice(5) : text;
+    }
+
+    /**
+     * 极简模板替换：把文案里的 {key} 换成 vars[key]。
+     * 字典里带数字的文案（「最近 {n} 天更新」「共 {n} 条 / 上限 {m} 条」）用占位符，
+     * 免得同一句话在 zh/en 里各写死一个数字。缺值保留占位符，绝不渲染出 "undefined"。
+     */
+    function fmt(text, vars) {
+      const source = String(text ?? '');
+      if (!vars) return source;
+      return source.replace(/\{(\w+)\}/g, (whole, key) => (
+        Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : whole
+      ));
+    }
+
+    function StatsBlock(props) {
+      const { t, stats, onRefresh } = props;
+      const head = h('div', { className: 'ace-stats-head' },
+        h('div', { className: 'ace-stats-title' }, t('statsTitle')),
+        h('button', { className: 'ace-stats-btn', type: 'button', onClick: onRefresh }, t('statsRefresh')));
+
+      if (!stats || stats.status === 'loading') {
+        return h('div', { className: 'ace-stats' }, head, h('div', { className: 'ace-stats-note' }, t('statsLoading')));
+      }
+      if (stats.status !== 'ready') {
+        return h('div', { className: 'ace-stats' }, head, h('div', { className: 'ace-stats-note' }, t('statsUnavailable')));
+      }
+
+      const data = stats.data ?? {};
+      const scale = data.scale ?? {};
+      const source = data.source ?? {};
+      const daily = Array.isArray(data.daily) ? data.daily : [];
+      const recent = Array.isArray(data.recent) ? data.recent : [];
+      const total = Number(source.total || 0);
+      const auto = Number(source.auto || 0);
+      const autoRatio = total > 0 ? auto / total : 0;
+      const maxEntries = typeof scale.maxEntries === 'number' ? scale.maxEntries : null;
+      const dailyMax = Math.max(Number(data.dailyMax || 0), 1);
+      // 天数取服务端返回的 windowDays（/stats 里有这个字段），缺字段或不是正整数时回退 14 ——
+      // 别在客户端写死窗口长度，服务端改了窗口这边跟着变。
+      const windowDays = Number.isInteger(Number(data.windowDays)) && Number(data.windowDays) > 0
+        ? Number(data.windowDays)
+        : 14;
+      const entriesText = maxEntries === null
+        ? String(Number(scale.entries || 0))
+        : String(Number(scale.entries || 0)) + ' / ' + String(maxEntries);
+
+      const cell = (key, text, accent) => h('div', { className: 'ace-stats-cell' },
+        h('div', { className: 'ace-stats-k' }, t(key)),
+        h('div', { className: accent ? 'ace-stats-v ace-stats-acc' : 'ace-stats-v' }, text));
+
+      // 空态：一行引导，其余（路径、生成时间）照常显示，不报错。
+      const emptyNote = data.reason ? h('div', { className: 'ace-stats-note' }, statsReasonText(t, data.reason)) : null;
+
+      return h('div', { className: 'ace-stats' },
+        head,
+        emptyNote,
+        h('div', { className: 'ace-stats-grid' },
+          cell('statsEntries', entriesText, true),
+          cell('statsTextChars', String(Number(scale.textChars || 0))),
+          cell('statsBytes', String(Number(scale.bytes || 0))),
+          cell('statsMtime', String(scale.mtime || '—'))),
+        h('div', { className: 'ace-stats-path' }, t('statsPath') + ' ' + String(data.file || data.playbookPath || '—')),
+        h('div', { className: 'ace-stats-sub' }, t('statsSource')),
+        h('div', { className: 'ace-stats-note' },
+          t('statsAuto') + ' ' + Math.round(autoRatio * 100) + '%（' + auto + ' / ' + total + '）'
+          + (auto === 0 ? ' · ' + t('statsAutoNone') : '')),
+        h('div', { className: 'ace-stats-sub' }, fmt(t('statsDaily'), { n: windowDays })),
+        h('div', { className: 'ace-stats-daily' },
+          daily.length === 0
+            ? h('div', { className: 'ace-stats-note' }, fmt(t('statsDailyEmpty'), { n: windowDays }))
+            : daily.map((row) => {
+              const count = Number(row?.count || 0);
+              // 条形宽度用内联 style 百分比（不动态注入 CSS 规则）。
+              const width = count === 0 ? 0 : Math.max(4, Math.round((count / dailyMax) * 100));
+              return h('div', { className: 'ace-stats-day', key: String(row?.date ?? '') },
+                h('span', { className: 'ace-stats-day-label' }, shortDay(row?.date)),
+                h('span', { className: 'ace-stats-bar' },
+                  h('span', { className: 'ace-stats-bar-fill', style: { width: width + '%' } })),
+                h('span', { className: 'ace-stats-day-count' }, String(count)));
+            })),
+        h('div', { className: 'ace-stats-sub' }, t('statsRecent')),
+        recent.length === 0
+          ? h('div', { className: 'ace-stats-note' }, t('statsRecentEmpty'))
+          : h('ul', { className: 'ace-stats-recent' },
+            recent.map((item) => h('li', { className: 'ace-stats-recent-item', key: String(item?.id ?? '') },
+              h('span', { className: 'ace-stats-id' }, String(item?.id ?? '')),
+              h('span', { className: 'ace-stats-recent-title' }, String(item?.title ?? '')),
+              h('span', { className: 'ace-stats-recent-date' }, String(item?.updated ?? ''))))),
+        data.generatedAt ? h('div', { className: 'ace-stats-note' }, t('statsGeneratedAt') + ' ' + String(data.generatedAt)) : null);
+    }
+
+    // 服务端 /entries 降级 reason → 字典键。missing（手册文件还不存在）与 needs-session
+    // （配置的是相对路径、HTTP 面无会话工作目录）都是「还没到能读」的正常状态，
+    // 只有 unreadable 才是读盘失败；未知 reason 一律按读盘失败处理。
+    const ENTRIES_REASON_KEYS = {
+      missing: 'entriesReasonMissing',
+      'needs-session': 'entriesReasonNeedsSession',
+      unreadable: 'entriesReasonUnreadable',
+    };
+
+    function entriesReasonText(t, reason) {
+      const key = ENTRIES_REASON_KEYS[String(reason ?? '')];
+      return t(key ?? 'entriesReasonUnreadable');
+    }
+
+    // —— 记录页（GET /entries，只读）——
+    // 数据源是宿主 lib/entries.js 的只读清单；失败/降级都只让本页显示一行文案，
+    // 不影响设置页与统计页。分页固定 20 条/页。
+    const ENTRIES_PAGE_SIZE = 20;
+
+    /** 编号里的数字部分：'ace-2' → 2。取不到数字的条目排在所有数字条目之后。 */
+    function entryNumber(id) {
+      const m = /(\d+)\s*$/.exec(String(id ?? ''));
+      return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+    }
+
+    /**
+     * 条目排序比较器。
+     * - 编号列：按数字比较（ace-2 在 ace-10 之前），不是字典序。
+     * - 更新日期列：按 'YYYY-MM-DD' 字符串比较（定长格式，字典序即时间序）。
+     * - 没有更新日期的条目恒定排末尾，与升降序无关（缺失不等于「最小」）。
+     * - 同值时用编号兜底，保证输出顺序稳定（兜底不受方向影响）。
+     */
+    function compareEntries(a, b, key, dir) {
+      const byId = () => {
+        const na = entryNumber(a?.id);
+        const nb = entryNumber(b?.id);
+        if (na !== nb) return na < nb ? -1 : 1;
+        const sa = String(a?.id ?? '');
+        const sb = String(b?.id ?? '');
+        return sa < sb ? -1 : (sa > sb ? 1 : 0);
+      };
+      if (key === 'id') {
+        const na = entryNumber(a?.id);
+        const nb = entryNumber(b?.id);
+        if (na === nb) return byId();
+        const order = na < nb ? -1 : 1;
+        return dir === 'desc' ? -order : order;
+      }
+      // 先 trim 再判空：'   ' 这种纯空白与「没有日期」同等处理，
+      // 否则它会以「非空字符串」的身份参与比较（升序排最前、降序排最后）。
+      const ua = String(a?.updated ?? '').trim();
+      const ub = String(b?.updated ?? '').trim();
+      if (ua === '' && ub === '') return byId();
+      if (ua === '') return 1;
+      if (ub === '') return -1;
+      if (ua === ub) return byId();
+      const order = ua < ub ? -1 : 1;
+      return dir === 'desc' ? -order : order;
+    }
+
+    /** 搜索：id / title / condition / action / rationale 全字段子串匹配，不区分大小写。 */
+    function entryMatches(entry, needle) {
+      if (needle === '') return true;
+      return ['id', 'title', 'condition', 'action', 'rationale']
+        .some((field) => String(entry?.[field] ?? '').toLowerCase().includes(needle));
+    }
+
+    function EntriesPage(props) {
+      const { t, active } = props;
+      // status：idle（还没进过记录页）| loading | ready | failed | unreadable（服务端降级 reason）
+      const [status, setStatus] = React.useState('idle');
+      // 降级 reason（missing / needs-session / unreadable）：三分派渲染不同文案，绝不合并。
+      const [reason, setReason] = React.useState(null);
+      const [data, setData] = React.useState({ entries: [], total: 0, maxEntries: null });
+      const [query, setQuery] = React.useState('');
+      const [sortKey, setSortKey] = React.useState('updated');
+      const [sortDir, setSortDir] = React.useState('desc');
+      const [page, setPage] = React.useState(1);
+      const [open, setOpen] = React.useState({});
+      const [reloadToken, setReloadToken] = React.useState(0);
+      const handled = React.useRef(-1);
+      // 竞态用请求代次计数器：每次发请求先自增，响应回来时代次对不上就直接丢弃。
+      // 不用 AbortController —— 这里只需要「丢弃旧响应」而不是真的取消网络，
+      // 且 signal 在宿主 fetch 包装/测试假宿主里不一定被支持，代次计数器没有这个依赖。
+      const gen = React.useRef(0);
+
+      const load = () => {
+        const mine = gen.current + 1;
+        gen.current = mine;
+        setStatus('loading');
+        fetch(ENTRIES_ROUTE, { headers: { accept: 'application/json' } })
+          .then((response) => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+          })
+          .then((payload) => {
+            if (gen.current !== mine) return;
+            if (!payload || payload.ok !== true || !Array.isArray(payload.entries)) {
+              setStatus('failed');
+              return;
+            }
+            setData({
+              entries: payload.entries,
+              total: Number.isFinite(Number(payload.total)) ? Number(payload.total) : payload.entries.length,
+              maxEntries: typeof payload.maxEntries === 'number' ? payload.maxEntries : null,
+            });
+            setReason(payload.reason ? String(payload.reason) : null);
+            setStatus(payload.reason ? 'unreadable' : 'ready');
+          })
+          .catch(() => { if (gen.current === mine) setStatus('failed'); });
+      };
+
+      // 懒加载：只有「记录页处于选中态」且这一轮 reloadToken 还没被处理过才拉。
+      // 切走再切回来 active 变 true 但 reloadToken 没变 → 不重复请求；点刷新才变。
+      React.useEffect(() => {
+        if (!active) return;
+        if (handled.current === reloadToken) return;
+        handled.current = reloadToken;
+        load();
+      }, [active, reloadToken]);
+
+      const reload = () => setReloadToken((n) => n + 1);
+      const head = h('div', { className: 'ace-entries-head' },
+        h('div', { className: 'ace-entries-title' }, t('entriesTitle')),
+        h('button', { type: 'button', className: 'ace-entries-btn', onClick: reload }, t('entriesRefresh')));
+
+      if (status === 'loading' || status === 'idle') {
+        return h('div', { className: 'ace-entries' }, head,
+          h('div', { className: 'ace-entries-note' }, t('entriesLoading')));
+      }
+      if (status === 'failed') {
+        return h('div', { className: 'ace-entries' }, head,
+          h('div', { className: 'ace-entries-note' }, t('entriesFailed')));
+      }
+      if (status === 'unreadable') {
+        return h('div', { className: 'ace-entries' }, head,
+          h('div', { className: 'ace-entries-note' }, entriesReasonText(t, reason)));
+      }
+
+      const all = Array.isArray(data.entries) ? data.entries : [];
+      if (all.length === 0) {
+        return h('div', { className: 'ace-entries' }, head,
+          h('div', { className: 'ace-entries-note' }, t('entriesEmpty')));
+      }
+
+      const needle = query.trim().toLowerCase();
+      const filtered = all.filter((entry) => entryMatches(entry, needle));
+      const sorted = filtered.slice().sort((a, b) => compareEntries(a, b, sortKey, sortDir));
+      const pageCount = Math.max(1, Math.ceil(sorted.length / ENTRIES_PAGE_SIZE));
+      const currentPage = Math.min(Math.max(page, 1), pageCount);
+      const rows = sorted.slice((currentPage - 1) * ENTRIES_PAGE_SIZE, currentPage * ENTRIES_PAGE_SIZE);
+
+      const toggleSort = (key) => {
+        if (sortKey === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+        else {
+          setSortKey(key);
+          setSortDir(key === 'updated' ? 'desc' : 'asc');
+        }
+        setPage(1);
+      };
+
+      const sortButton = (key, label) => h('button', {
+        type: 'button',
+        className: 'ace-entries-sort' + (sortKey === key ? ' is-active' : ''),
+        'aria-sort': sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none',
+        onClick: () => toggleSort(key),
+      }, label + (sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''));
+
+      const detailBlock = (labelKey, value, emptyKey) => {
+        const text = String(value ?? '');
+        if (text.trim() === '') {
+          // 依据为空：显示占位行，不渲染空白块；条件/做法为空则整块不渲染。
+          return emptyKey
+            ? h('div', { className: 'ace-entries-detail-block' },
+              h('div', { className: 'ace-entries-detail-k' }, t(labelKey)),
+              h('div', { className: 'ace-entries-detail-empty' }, t(emptyKey)))
+            : null;
+        }
+        return h('div', { className: 'ace-entries-detail-block' },
+          h('div', { className: 'ace-entries-detail-k' }, t(labelKey)),
+          h('div', { className: 'ace-entries-detail-v' }, text));
+      };
+
+      const toggleRow = (id) => setOpen((prev) => ({ ...prev, [id]: !prev[id] }));
+
+      const list = h('ul', { className: 'ace-entries-list' },
+        rows.map((entry) => {
+          const id = String(entry?.id ?? '');
+          const isOpen = open[id] === true;
+          return h('li', { key: 'entry:' + id, className: 'ace-entries-item' },
+            h('div', {
+              className: 'ace-entries-row',
+              role: 'button',
+              tabIndex: 0,
+              'aria-expanded': isOpen ? 'true' : 'false',
+              onClick: () => toggleRow(id),
+              onKeyDown: (e) => {
+                if (e?.key !== 'Enter' && e?.key !== ' ') return;
+                if (typeof e.preventDefault === 'function') e.preventDefault();
+                toggleRow(id);
+              },
+            },
+              h('span', { className: 'ace-entries-row-id' }, id),
+              h('span', { className: 'ace-entries-row-title' }, String(entry?.title ?? '')),
+              h('span', { className: 'ace-entries-row-date' }, String(entry?.updated ?? '') || '—'),
+              h('span', {
+                className: 'ace-entries-row-source' + (entry?.auto === true ? ' is-auto' : ''),
+              }, entry?.auto === true ? t('entriesAuto') : t('entriesManual'))),
+            isOpen
+              ? h('div', { className: 'ace-entries-detail' },
+                detailBlock('entriesCondition', entry?.condition, null),
+                detailBlock('entriesAction', entry?.action, null),
+                detailBlock('entriesRationale', entry?.rationale, 'entriesRationaleEmpty'))
+              : null);
+        }));
+
+      const pageButtons = [];
+      for (let i = 1; i <= pageCount; i += 1) {
+        pageButtons.push(h('button', {
+          key: 'page:' + i,
+          type: 'button',
+          className: 'ace-entries-pager-btn' + (i === currentPage ? ' is-active' : ''),
+          'aria-current': i === currentPage ? 'page' : 'false',
+          onClick: () => setPage(i),
+        }, String(i)));
+      }
+
+      const pager = h('div', { className: 'ace-entries-pager' },
+        h('button', {
+          type: 'button',
+          className: 'ace-entries-pager-btn',
+          disabled: currentPage <= 1,
+          onClick: () => setPage(currentPage - 1),
+        }, t('entriesPrev')),
+        pageButtons,
+        h('span', { className: 'ace-entries-pager-text' }, fmt(t('entriesPage'), { x: currentPage, y: pageCount })),
+        h('button', {
+          type: 'button',
+          className: 'ace-entries-pager-btn',
+          disabled: currentPage >= pageCount,
+          onClick: () => setPage(currentPage + 1),
+        }, t('entriesNext')));
+
+      return h('div', { className: 'ace-entries' },
+        head,
+        h('input', {
+          className: 'ace-entries-search',
+          type: 'text',
+          value: query,
+          placeholder: t('entriesSearchPlaceholder'),
+          'aria-label': t('entriesSearchPlaceholder'),
+          onChange: (e) => { setQuery(String(e?.target?.value ?? '')); setPage(1); },
+        }),
+        h('div', { className: 'ace-entries-count' },
+          fmt(t('entriesCount'), { n: data.total, m: data.maxEntries === null ? '—' : data.maxEntries })),
+        h('div', { className: 'ace-entries-head-row' },
+          sortButton('id', t('entriesColId')),
+          h('span', { className: 'ace-entries-row-title' }, t('entriesColTitle')),
+          sortButton('updated', t('entriesColUpdated')),
+          h('span', { className: 'ace-entries-row-source' }, t('entriesColSource'))),
+        filtered.length === 0
+          ? h('div', { className: 'ace-entries-note' }, t('entriesNoMatch'))
+          : list,
+        filtered.length === 0 ? null : pager);
+    }
+
+    // 三页标签的固定顺序（方向键循环/Home/End 的基准）与它们的 DOM 节点表。
+    // 节点表在每次渲染时由 tabButton 的 ref 回填，只在切页后用来 .focus() —— 因此
+    // 没有真实 DOM 的环境（测试 / SSR）里表里是空或陈旧对象，moveTab 会做守卫跳过。
+    const TAB_IDS = ['stats', 'settings', 'entries'];
+    const TAB_NODES = {};
+
     function AceSection(props) {
       const { t } = props;
       const [state, setState] = React.useState({ status: 'loading' });
@@ -398,19 +986,42 @@ window.__ModuleLoader__.load({
       // 待合并复审列表：status 取 'loading' | 'ready' | 'failed'。
       // failed（宿主还没重启时会 404）只让这一区块变成一行灰字，其余字段照常可用 ——
       // 范式同上面的 catalog failed，绝不能因此让整页报错。
-      const [inbox, setInbox] = React.useState({ status: 'loading', items: [], full: false });
-
-      const adopt = (payload) => {
-        const value = payload && typeof payload.value === 'object' && payload.value ? payload.value : {};
-        setState({ status: 'ready', value, stored: payload?.stored ?? {}, configured: payload?.configured ?? {}, file: payload?.file });
-        setDraft({});
-      };
+      // cap 是宿主 INBOX_CAP 的实时值（/inbox 返回），文案里的条数不许写死。
+      const [inbox, setInbox] = React.useState({ status: 'loading', items: [], full: false, cap: 20 });
+      // 手册统计：status 取 'loading' | 'ready' | 'failed'；data 是 /stats 的完整返回。
+      // 刷新不清空已有数据（旧数字留在原地，等新结果覆盖），避免页面跳动。
+      const [stats, setStats] = React.useState({ status: 'loading', data: null });
+      const [statsReload, setStatsReload] = React.useState(0);
+      // 当前选中的页面：'stats' | 'settings' | 'entries'，默认统计页。
+      // 刻意不写 localStorage —— 刷新回统计页是明确要求。
+      const [tabId, setTabId] = React.useState('stats');
 
       React.useEffect(() => {
         let alive = true;
+        // 必须同时验 response.ok 与 payload.ok：围栏拒绝时回的是 403 { error: 'forbidden' }，
+        // 没有 value 字段。旧实现直接把它喂给 adopt()，value 兜底成 {}，
+        // 整页就渲染成「全默认值」并在底栏声称「当前值来自插件行 Config」——用户看到的是假配置。
         fetch(ROUTE, { headers: { accept: 'application/json' } })
-          .then((response) => response.json())
-          .then((payload) => { if (alive) adopt(payload); })
+          .then((response) => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+          })
+          .then((payload) => {
+            if (!alive) return;
+            if (!payload || payload.ok !== true || typeof payload.value !== 'object' || payload.value === null) {
+              setState({ status: 'failed' });
+              return;
+            }
+            setState({
+              status: 'ready',
+              value: payload.value,
+              configured: payload.configured ?? {},
+              stored: payload.stored ?? {},
+              file: payload.file,
+              bounds: payload.bounds ?? null,
+            });
+            setDraft({});
+          })
           .catch(() => { if (alive) setState({ status: 'failed' }); });
         return () => { alive = false; };
       }, []);
@@ -425,12 +1036,18 @@ window.__ModuleLoader__.load({
           .then((payload) => {
             if (!alive) return;
             if (!payload || payload.ok !== true || !Array.isArray(payload.items)) {
-              setInbox({ status: 'failed', items: [], full: false });
+              setInbox({ status: 'failed', items: [], full: false, cap: 20 });
               return;
             }
-            setInbox({ status: 'ready', items: payload.items, full: payload.full === true });
+            setInbox({
+              status: 'ready',
+              items: payload.items,
+              full: payload.full === true,
+              // 宿主改 INBOX_CAP 后这里自动跟上；cap 缺失才回退 20（老宿主）。
+              cap: Number.isFinite(Number(payload.cap)) && Number(payload.cap) > 0 ? Number(payload.cap) : 20,
+            });
           })
-          .catch(() => { if (alive) setInbox({ status: 'failed', items: [], full: false }); });
+          .catch(() => { if (alive) setInbox({ status: 'failed', items: [], full: false, cap: 20 }); });
         return () => { alive = false; };
       }, []);
 
@@ -453,6 +1070,28 @@ window.__ModuleLoader__.load({
         return () => { alive = false; };
       }, []);
 
+      // 打开页面拉一次；statsReload 变化时（点「刷新」按钮、设置保存成功后）再拉一次。
+      React.useEffect(() => {
+        let alive = true;
+        fetch(STATS_ROUTE, { headers: { accept: 'application/json' } })
+          .then((response) => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+          })
+          .then((payload) => {
+            if (!alive) return;
+            if (!payload || payload.ok !== true || typeof payload.scale !== 'object' || payload.scale === null) {
+              setStats({ status: 'failed', data: null });
+              return;
+            }
+            setStats({ status: 'ready', data: payload });
+          })
+          .catch(() => { if (alive) setStats({ status: 'failed', data: null }); });
+        return () => { alive = false; };
+      }, [statsReload]);
+
+      const reloadStats = () => setStatsReload((n) => n + 1);
+
       const send = (method, body, doneText) => {
         setStatus(null);
         fetch(ROUTE, {
@@ -464,7 +1103,13 @@ window.__ModuleLoader__.load({
             if (!response.ok) throw new Error(payload?.error ?? ('HTTP ' + response.status));
             return payload;
           }))
-          .then((payload) => { adopt(payload); setStatus({ kind: 'ok', text: doneText }); })
+          .then((payload) => {
+            if (!payload || payload.ok !== true) throw new Error(payload?.error ?? 'unexpected response');
+            adopt(payload);
+            setStatus({ kind: 'ok', text: doneText });
+            // 保存成功后顺手重拉统计：手册路径/容量可能刚被改过。
+            reloadStats();
+          })
           .catch((error) => setStatus({ kind: 'err', text: String(error?.message ?? error) }));
       };
 
@@ -480,6 +1125,20 @@ window.__ModuleLoader__.load({
       if (state.status !== 'ready') {
         return h('div', { className: 'ace-set' }, h('style', null, CSS), h('div', { className: 'ace-set-note' }, t('failed')));
       }
+
+      // 设置回写后的整体接管：POST / DELETE 与 GET 返回同一个 describe() 形状，
+      // 两边共用一份 adopt，bounds 也一起刷新（绝不各自解析一遍）。
+      const adopt = (payload) => {
+        setState({
+          status: 'ready',
+          value: payload.value,
+          configured: payload.configured ?? {},
+          stored: payload.stored ?? {},
+          file: payload.file,
+          bounds: payload.bounds ?? null,
+        });
+        setDraft({});
+      };
 
       const value = (field) => (Object.prototype.hasOwnProperty.call(draft, field) ? draft[field] : state.value[field]);
       const setDraftField = (field, v) => setDraft((d) => ({ ...d, [field]: v }));
@@ -499,18 +1158,45 @@ window.__ModuleLoader__.load({
         onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
       });
 
-      const numProps = (field, min = 1, ph) => ({
+      // bounds 来自 describe()（lib/index.js 的 MAX_ENTRIES_RANGE 等），
+      // 客户端不再自己写死边界：同一组数字只准有服务端一个出处。
+      const bounds = state.bounds && typeof state.bounds === 'object' ? state.bounds : null;
+      const boundsOf = (field, fallback) => {
+        const pair = bounds ? bounds[field] : null;
+        if (Array.isArray(pair) && Number.isFinite(Number(pair[0])) && Number.isFinite(Number(pair[1]))) {
+          return [Number(pair[0]), Number(pair[1])];
+        }
+        return fallback;
+      };
+      // 默认值也只有一个出处：服务端 describe() 的 bounds.defaults（其值是 lib/playbook-path.js
+      // 的 DEFAULT_MAX_ENTRIES）。缺失（老宿主）时回退 100 —— 这个 100 仅作向后兼容兜底，
+      // 正常路径下文案与 placeholder 的数字全部来自 payload。
+      const boundsDefaults = bounds && typeof bounds.defaults === 'object' && bounds.defaults ? bounds.defaults : null;
+      const boundsDefault = (field, fallback) => {
+        const raw = boundsDefaults ? boundsDefaults[field] : null;
+        return Number.isFinite(Number(raw)) && raw !== null ? Number(raw) : fallback;
+      };
+      const maxEntriesRange = boundsOf('maxEntries', [1, 1000]);
+      const maxEntriesDefault = boundsDefault('maxEntries', 100);
+      const thresholdRange = boundsOf('autoRecapThreshold', [0, 1000]);
+      const cooldownRange = boundsOf('autoRecapCooldownTurns', [0, 1000]);
+
+      const numProps = (field, min = 1, ph, max) => ({
         className: 'ace-set-input',
         type: 'number',
         min,
+        max,
         step: 1,
         placeholder: ph || '',
         value: String(value(field) == null ? '' : value(field)),
         onChange: (e) => setDraftField(field, e.target.value),
         onBlur: () => {
           if (!Object.prototype.hasOwnProperty.call(draft, field)) return;
-          const n = Math.max(min, Math.floor(Number(draft[field])));
-          if (!Number.isFinite(n) || n === Number(state.value[field])) return;
+          const raw = Math.floor(Number(draft[field]));
+          if (!Number.isFinite(raw)) return;
+          const upper = Number.isFinite(Number(max)) ? Number(max) : Number.POSITIVE_INFINITY;
+          const n = Math.min(upper, Math.max(min, raw));
+          if (n === Number(state.value[field])) return;
           commit(field, n);
         },
         onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
@@ -558,106 +1244,196 @@ window.__ModuleLoader__.load({
       // 语义红线（lib/llm.js:17-30 resolveRoute）：两项都非空才用覆盖值，只填一项会静默回落。
       const pairIncomplete = (currentProvider !== '') !== (currentModel !== '');
 
+      // 一个 tab：role="tab" + aria-selected + 可见选中态（.ace-tab.is-active 的底边高亮/背景差）。
+      // roving tabindex：只有选中的 tab 进 tab 序（tabIndex=0），其余 -1 —— 于是「切页」
+      // 完全靠 tablist 上的方向键（见 moveTab），绝不能停在原地出不去。
+      const tabButton = (id, label) => h('button', {
+        key: 'tab:' + id,
+        type: 'button',
+        role: 'tab',
+        id: 'ace-tab-' + id,
+        ref: (node) => { if (node) TAB_NODES[id] = node; },
+        'aria-selected': tabId === id ? 'true' : 'false',
+        'aria-controls': 'ace-page-' + id,
+        tabIndex: tabId === id ? 0 : -1,
+        className: 'ace-tab' + (tabId === id ? ' is-active' : ''),
+        onClick: () => setTabId(id),
+      }, label);
+
+      // 方向键循环移动 / Home、End 跳首末；移动后把焦点交给新选中的 tab。
+      // 焦点转移必须做存在性守卫：宿主环境有真实 DOM，测试与 SSR 里没有 ——
+      // 没有 DOM 时只是不挪焦点，绝不能抛错让整页崩掉。
+      const moveTab = (nextId) => {
+        setTabId(nextId);
+        const node = TAB_NODES[nextId];
+        if (node && typeof node.focus === 'function') node.focus();
+      };
+      const onTabsKeyDown = (event) => {
+        if (!event) return;
+        const ids = TAB_IDS;
+        const current = ids.indexOf(tabId) === -1 ? 0 : ids.indexOf(tabId);
+        let next = null;
+        if (event.key === 'ArrowLeft') next = ids[(current - 1 + ids.length) % ids.length];
+        else if (event.key === 'ArrowRight') next = ids[(current + 1) % ids.length];
+        else if (event.key === 'Home') next = ids[0];
+        else if (event.key === 'End') next = ids[ids.length - 1];
+        if (next === null) return;
+        event.preventDefault();
+        if (next !== tabId) moveTab(next);
+      };
+
       return h('div', { className: 'ace-set' },
         h('style', null, CSS),
         h('span', { className: 'ace-set-tag' }, t('sectionTag')),
         h('div', { className: 'ace-set-title' }, t('title')),
         h('div', { className: 'ace-set-sub' }, t('subtitle')),
-        h(FieldRow, { label: t('fieldPlaybookPath'), desc: t('fieldPlaybookPathDesc'), control: h('input', textProps('playbookPath', t('playbookPathPlaceholder'))) }),
-        h(FieldRow, {
-          label: t('fieldAutoReflect'), desc: t('fieldAutoReflectDesc'),
-          control: h(Switch, {
-            checked: state.value.autoReflect !== false,
-            onChange: (next) => commit('autoReflect', next),
-            onText: t('on'), offText: t('off'),
-          }),
-        }),
-        h(FieldRow, {
-          label: t('fieldProvider'), desc: t('fieldProviderDesc'),
-          control: h(ModelPicker, {
-            value: currentProvider,
-            groups: providerGroups,
-            placeholder: t('pickProviderPlaceholder'),
-            searchPlaceholder: t('pickProviderSearch'),
-            noMatchText: t('pickNoMatchProvider'),
-            clearText: t('pickClear'),
-            errorText: catalogError,
-            loading: catalogLoading,
-            onPick: pickProvider,
-            onClear: () => commit('reflectProvider', ''),
-          }),
-        }),
-        h(FieldRow, {
-          label: t('fieldModel'), desc: t('fieldModelDesc'),
-          control: h(ModelPicker, {
-            value: currentModel,
-            groups: modelGroups,
-            placeholder: t('pickModelPlaceholder'),
-            searchPlaceholder: t('pickModelSearch'),
-            noMatchText: t('pickNoMatchModel'),
-            clearText: t('pickClear'),
-            errorText: catalogError,
-            loading: catalogLoading,
-            onPick: pickModel,
-            onClear: () => commit('reflectModel', ''),
-          }),
-        }),
-        // 只填一项时的显式警告：两项恰好只有一个非空才出现（见 lib/llm.js:17-30 的 && 语义）。
-        pairIncomplete ? h('div', { className: 'ace-set-warn' }, t('warnPair')) : null,
-        h(FieldRow, { label: t('fieldMaxEntries'), desc: t('fieldMaxEntriesDesc'), control: h('input', numProps('maxEntries', 1, t('maxEntriesPlaceholder'))) }),
-        h(FieldRow, {
-          label: t('fieldAutoRecap'), desc: t('fieldAutoRecapDesc'),
-          control: h(Switch, {
-            checked: state.value.autoRecap !== false,
-            onChange: (next) => commit('autoRecap', next),
-            onText: t('on'), offText: t('off'),
-          }),
-        }),
-        h(FieldRow, {
-          label: t('fieldAutoRecapThreshold'), desc: t('fieldAutoRecapThresholdDesc'),
-          control: h('input', numProps('autoRecapThreshold', 0)),
-        }),
-        h(FieldRow, {
-          label: t('fieldAutoRecapCooldownTurns'), desc: t('fieldAutoRecapCooldownTurnsDesc'),
-          control: h('input', numProps('autoRecapCooldownTurns', 0)),
-        }),
-        h(FieldRow, {
-          label: t('fieldAutoReviewInbox'), desc: t('fieldAutoReviewInboxDesc'),
-          control: h(Switch, {
-            checked: state.value.autoReviewInbox === true,
-            onChange: (next) => commit('autoReviewInbox', next),
-            onText: t('on'), offText: t('off'),
-          }),
-        }),
-        // —— 待合并复审（独立区块；失败只降级成一行灰字）——
-        h('div', { className: 'ace-inbox' },
-          h('div', { className: 'ace-inbox-title' }, t('inboxTitle')),
-          inbox.status === 'failed'
-            ? h('div', { className: 'ace-inbox-empty' }, t('inboxUnavailable'))
-            : (inbox.full ? h('div', { className: 'ace-inbox-full' }, t('inboxFull')) : null),
-          inbox.status === 'ready' && !inbox.full && inbox.items.length === 0
-            ? h('div', { className: 'ace-inbox-empty' }, t('inboxEmpty'))
-            : null,
-          inbox.status === 'ready' && inbox.items.length > 0 ? h('ul', { className: 'ace-inbox-list' },
-            inbox.items.map((item, index) => h('li', { key: 'inbox:' + index + ':' + item.newEntryId, className: 'ace-inbox-item' },
-              h('div', { className: 'ace-inbox-pair' },
-                h('span', { className: 'ace-inbox-id' }, String(item.newEntryId ?? '')),
-                h('span', { className: 'ace-inbox-title2' }, ' 《' + String(item.newEntryTitle ?? '') + '》'),
-                h('span', { className: 'ace-inbox-arrow' }, '↔'),
-                h('span', { className: 'ace-inbox-id' }, String(item.bestMatchId ?? '')),
-                h('span', { className: 'ace-inbox-title2' }, ' 《' + String(item.bestMatchTitle ?? '') + '》')),
-              h('div', { className: 'ace-inbox-ratio' },
-                t('inboxRatio') + ' ' + Math.round(Number(item.ratio || 0) * 100) + '%'))))
-            : null,
-          inbox.status === 'ready' ? h('div', { className: 'ace-inbox-note' }, t('inboxHint')) : null),
+        // —— 三页导航（标题之下、内容之上）——
+        h('div', { className: 'ace-tabs', role: 'tablist', 'aria-label': t('nav'), onKeyDown: onTabsKeyDown },
+          tabButton('stats', t('tabStats')),
+          tabButton('settings', t('tabSettings')),
+          tabButton('entries', t('tabEntries'))),
+        // 三个页面始终都在树里，只把未选中的用 [hidden] 藏起来（.ace-page[hidden]{display:none}）。
+        // 因此切页不会卸载任何组件：设置页填了一半的 draft、记录页的搜索词与页码都留在原地。
         h('div', {
-          className: status ? ('ace-set-status ace-set-status-' + (status.kind === 'ok' ? 'ok' : 'err')) : 'ace-set-status',
-        }, status ? status.text : ''),
-        h('div', { className: 'ace-set-foot' },
-          h('span', { className: 'ace-set-hint', style: { borderTop: 'none', marginTop: 0, paddingTop: 0 } },
-            fromStored ? t('fromStored') : t('fromConfigured')),
-          h('button', { className: 'ace-set-btn', type: 'button', onClick: () => send('DELETE', undefined, t('reset')) }, t('resetBtn'))),
-        h('div', { className: 'ace-set-hint' }, t('editableHint')));
+          className: 'ace-page',
+          role: 'tabpanel',
+          id: 'ace-page-stats',
+          'aria-labelledby': 'ace-tab-stats',
+          hidden: tabId !== 'stats',
+        }, h(StatsBlock, { t, stats, onRefresh: reloadStats })),
+        h('div', {
+          className: 'ace-page',
+          role: 'tabpanel',
+          id: 'ace-page-settings',
+          'aria-labelledby': 'ace-tab-settings',
+          hidden: tabId !== 'settings',
+        },
+          // 每个控件的可访问名都由 FieldRow 的 label 关联过来（htmlFor/id 或 aria-labelledby），
+          // Switch 的 aria-label 恒定为字段名，开关状态只由 aria-checked 承载。
+          h(FieldRow, {
+            label: t('fieldPlaybookPath'), desc: t('fieldPlaybookPathDesc'), controlId: 'ace-field-playbookPath',
+            control: h('input', { ...textProps('playbookPath', t('playbookPathPlaceholder')), id: 'ace-field-playbookPath' }),
+          }),
+          h(FieldRow, {
+            label: t('fieldAutoReflect'), desc: t('fieldAutoReflectDesc'), controlId: 'ace-field-autoReflect',
+            control: h(Switch, {
+              id: 'ace-field-autoReflect',
+              label: t('fieldAutoReflect'),
+              checked: state.value.autoReflect !== false,
+              onChange: (next) => commit('autoReflect', next),
+              onText: t('on'), offText: t('off'),
+            }),
+          }),
+          h(FieldRow, {
+            label: t('fieldProvider'), desc: t('fieldProviderDesc'), controlId: 'ace-field-reflectProvider',
+            control: h(ModelPicker, {
+              ariaLabel: t('fieldProvider'),
+              pickerId: 'ace-field-reflectProvider',
+              labelId: 'ace-field-reflectProvider-label',
+              value: currentProvider,
+              groups: providerGroups,
+              placeholder: t('pickProviderPlaceholder'),
+              searchPlaceholder: t('pickProviderSearch'),
+              noMatchText: t('pickNoMatchProvider'),
+              clearText: t('pickClear'),
+              errorText: catalogError,
+              loading: catalogLoading,
+              onPick: pickProvider,
+              onClear: () => commit('reflectProvider', ''),
+            }),
+          }),
+          h(FieldRow, {
+            label: t('fieldModel'), desc: t('fieldModelDesc'), controlId: 'ace-field-reflectModel',
+            control: h(ModelPicker, {
+              ariaLabel: t('fieldModel'),
+              pickerId: 'ace-field-reflectModel',
+              labelId: 'ace-field-reflectModel-label',
+              value: currentModel,
+              groups: modelGroups,
+              placeholder: t('pickModelPlaceholder'),
+              searchPlaceholder: t('pickModelSearch'),
+              noMatchText: t('pickNoMatchModel'),
+              clearText: t('pickClear'),
+              errorText: catalogError,
+              loading: catalogLoading,
+              onPick: pickModel,
+              onClear: () => commit('reflectModel', ''),
+            }),
+          }),
+          // 只填一项时的显式警告：两项恰好只有一个非空才出现（见 lib/llm.js:17-30 的 && 语义）。
+          pairIncomplete ? h('div', { className: 'ace-set-warn' }, t('warnPair')) : null,
+          // min/max 与文案里的数字全部取自 payload.bounds（服务端 describe() 的唯一边界出处）。
+          h(FieldRow, {
+            label: t('fieldMaxEntries'),
+            desc: fmt(t('fieldMaxEntriesDesc'), { min: maxEntriesRange[0], max: maxEntriesRange[1], d: maxEntriesDefault }),
+            controlId: 'ace-field-maxEntries',
+            // placeholder 也是同一份默认值（不再写死 '100'）：宿主改了 DEFAULT_MAX_ENTRIES，这里跟着变。
+            control: h('input', { ...numProps('maxEntries', maxEntriesRange[0], String(maxEntriesDefault), maxEntriesRange[1]), id: 'ace-field-maxEntries' }),
+          }),
+          h(FieldRow, {
+            label: t('fieldAutoRecap'), desc: t('fieldAutoRecapDesc'), controlId: 'ace-field-autoRecap',
+            control: h(Switch, {
+              id: 'ace-field-autoRecap',
+              label: t('fieldAutoRecap'),
+              checked: state.value.autoRecap !== false,
+              onChange: (next) => commit('autoRecap', next),
+              onText: t('on'), offText: t('off'),
+            }),
+          }),
+          h(FieldRow, {
+            label: t('fieldAutoRecapThreshold'), desc: t('fieldAutoRecapThresholdDesc'), controlId: 'ace-field-autoRecapThreshold',
+            control: h('input', { ...numProps('autoRecapThreshold', thresholdRange[0], undefined, thresholdRange[1]), id: 'ace-field-autoRecapThreshold' }),
+          }),
+          h(FieldRow, {
+            label: t('fieldAutoRecapCooldownTurns'), desc: t('fieldAutoRecapCooldownTurnsDesc'), controlId: 'ace-field-autoRecapCooldownTurns',
+            control: h('input', { ...numProps('autoRecapCooldownTurns', cooldownRange[0], undefined, cooldownRange[1]), id: 'ace-field-autoRecapCooldownTurns' }),
+          }),
+          h(FieldRow, {
+            label: t('fieldAutoReviewInbox'), desc: t('fieldAutoReviewInboxDesc'), controlId: 'ace-field-autoReviewInbox',
+            control: h(Switch, {
+              id: 'ace-field-autoReviewInbox',
+              label: t('fieldAutoReviewInbox'),
+              checked: state.value.autoReviewInbox === true,
+              onChange: (next) => commit('autoReviewInbox', next),
+              onText: t('on'), offText: t('off'),
+            }),
+          }),
+          // —— 待合并复审（独立区块；失败只降级成一行灰字）——
+          h('div', { className: 'ace-inbox' },
+            h('div', { className: 'ace-inbox-title' }, t('inboxTitle')),
+            inbox.status === 'failed'
+              ? h('div', { className: 'ace-inbox-empty' }, t('inboxUnavailable'))
+              : (inbox.full ? h('div', { className: 'ace-inbox-full' }, fmt(t('inboxFull'), { n: inbox.cap })) : null),
+            inbox.status === 'ready' && !inbox.full && inbox.items.length === 0
+              ? h('div', { className: 'ace-inbox-empty' }, t('inboxEmpty'))
+              : null,
+            inbox.status === 'ready' && inbox.items.length > 0 ? h('ul', { className: 'ace-inbox-list' },
+              inbox.items.map((item, index) => h('li', { key: 'inbox:' + index + ':' + item.newEntryId, className: 'ace-inbox-item' },
+                h('div', { className: 'ace-inbox-pair' },
+                  h('span', { className: 'ace-inbox-id' }, String(item.newEntryId ?? '')),
+                  h('span', { className: 'ace-inbox-title2' }, ' 《' + String(item.newEntryTitle ?? '') + '》'),
+                  h('span', { className: 'ace-inbox-arrow' }, '↔'),
+                  h('span', { className: 'ace-inbox-id' }, String(item.bestMatchId ?? '')),
+                  h('span', { className: 'ace-inbox-title2' }, ' 《' + String(item.bestMatchTitle ?? '') + '》')),
+                h('div', { className: 'ace-inbox-ratio' },
+                  t('inboxRatio') + ' ' + Math.round(Number(item.ratio || 0) * 100) + '%'))))
+              : null,
+            inbox.status === 'ready' ? h('div', { className: 'ace-inbox-note' }, t('inboxHint')) : null),
+          h('div', {
+            className: status ? ('ace-set-status ace-set-status-' + (status.kind === 'ok' ? 'ok' : 'err')) : 'ace-set-status',
+          }, status ? status.text : ''),
+          h('div', { className: 'ace-set-foot' },
+            h('span', { className: 'ace-set-hint', style: { borderTop: 'none', marginTop: 0, paddingTop: 0 } },
+              fromStored ? t('fromStored') : t('fromConfigured')),
+            h('button', { className: 'ace-set-btn', type: 'button', onClick: () => send('DELETE', undefined, t('reset')) }, t('resetBtn'))),
+          h('div', { className: 'ace-set-hint' }, t('editableHint'))),
+        h('div', {
+          className: 'ace-page',
+          role: 'tabpanel',
+          id: 'ace-page-entries',
+          'aria-labelledby': 'ace-tab-entries',
+          hidden: tabId !== 'entries',
+        }, h(EntriesPage, { t, active: tabId === 'entries' })));
     }
 
     function apply(ctx) {

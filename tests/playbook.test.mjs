@@ -84,7 +84,43 @@ test('applyOps：update 合并字段并刷新 updated 日期', () => {
   const r = applyOps(entries, [{ op: 'update', id: 'ace-001', action: '先完整 read 再动手' }], 60);
   assert.deepEqual(r.updated, ['ace-001']);
   assert.equal(r.entries[0].action, '先完整 read 再动手');
-  assert.equal(r.entries[0].meta.updated, new Date().toISOString().slice(0, 10));
+  // 必须是本地时区口径（与 lib/stats.js 的 dateKey 一致）：toISOString() 是 UTC，
+  // UTC+8 早上 8 点前写进去的条目会拿到「昨天」，落进前一天的统计桶。
+  const nowDate = new Date();
+  const localToday = String(nowDate.getFullYear()) + '-'
+    + String(nowDate.getMonth() + 1).padStart(2, '0') + '-'
+    + String(nowDate.getDate()).padStart(2, '0');
+  assert.equal(r.entries[0].meta.updated, localToday);
+});
+
+test('applyOps：today() 走本地时区口径 —— UTC+9 早上写进去的是「今天」而不是「昨天」', () => {
+  // 旧实现用 new Date().toISOString().slice(0,10)（UTC 口径），而 lib/stats.js 的 dateKey
+  // 是本地时区：UTC+8/9 早上 8 点前写入的条目日期是「昨天」，落进前一天的统计桶、当天桶为 0。
+  // 这里把系统时钟钉在 2026-03-04T23:30Z（东京本地 = 2026-03-05 08:30），
+  // UTC 口径给 '2026-03-04'、本地口径给 '2026-03-05' —— 两者必然不同，断言不依赖跑测的时刻。
+  const RealDate = globalThis.Date;
+  const prevTZ = process.env.TZ;
+  try {
+    process.env.TZ = 'Asia/Tokyo';
+    const FIXED = '2026-03-04T23:30:00Z';
+    globalThis.Date = class extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(FIXED);
+        else super(...args);
+      }
+      static now() { return new RealDate(FIXED).getTime(); }
+    };
+    const { entries } = parsePlaybook(SAMPLE);
+    const updated = applyOps(entries, [{ op: 'update', id: 'ace-001', action: '先完整 read 再动手' }], 60);
+    assert.equal(updated.entries[0].meta.updated, '2026-03-05', 'update 走本地日期');
+    const added = applyOps(entries, [{ op: 'add', title: '新经验', condition: 'c', action: 'a' }], 60);
+    assert.equal(added.entries[2].meta.created, '2026-03-05', 'add 的 created 同口径');
+    assert.equal(added.entries[2].meta.updated, '2026-03-05', 'add 的 updated 同口径');
+  } finally {
+    globalThis.Date = RealDate;
+    if (prevTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTZ;
+  }
 });
 
 test('applyOps：remove 删除条目', () => {

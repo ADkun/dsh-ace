@@ -29,10 +29,12 @@ dsh-ace 是 DSH 原生插件（cordis bundle），实现 ACE 方法：把操作�
 | `lib/llm.js` | 模型路由解析与单次 LLM 调用 |
 | `lib/playbook-path.js` | 手册文件位置解析（绝对路径 / `~` 展开 / 相对工作目录 / 空串=本机共享层 `<DSH home>/ace/playbook.md`；纯逻辑，可独立测试） |
 | `lib/settings-path.js` | 设置文件位置解析（profileContext → DSH_PROFILE_DIR → DSH_HOME → ~/.dsh）与旧文件一次性迁移（纯逻辑，可独立测试） |
+| `lib/entries.js` | 手册条目清单（`GET /api/dsh-ace/entries` 的数据源）：复用 `parsePlaybook` 把解析结果摊平成固定形状的记录；**只读**，不写盘不加锁（纯逻辑 + 只读 IO，可独立测试） |
 | `tests/playbook.test.mjs` | 持久化层单元测试（node --test） |
 | `tests/concurrency.test.mjs` | 真实子进程并发用例（两个 node 子进程同时操作同一本手册，跑 lib/commit.js 的生产同款路径；脚本写在系统临时目录，用完即删） |
 | `tests/playbook-path.test.mjs` | 手册路径解析链的单元测试（node --test） |
 | `tests/settings-path.test.mjs` | 设置路径解析与迁移的单元测试（node --test） |
+| `tests/entries.test.mjs` | 条目清单的单元测试 + `GET /api/dsh-ace/entries` 的 HTTP 面契约（行为面跑分支调用的函数，源码级钉住围栏/405/降级） |
 
 ## 命令
 

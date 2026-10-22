@@ -15,7 +15,7 @@ last_reviewed: 2026-10-21
 npm test
 ```
 
-当前 147 条用例：146 通过 + 1 条在 Windows 上条件跳过（T47 文件权限位，见未验证清单 7）。其中手册路径解析链 9 条（T48–T56）、跨进程文件锁 4 条（T57–T60）、跨进程锁覆盖整个读-改-写区间 3 条（T61–T63）为「手册默认本机共享层」改造新增；跨进程锁语义返工又新增 4 条（T64–T67，见下表）；并发冲突检测（快照 + 冲突报错）再新增 3 条（T68–T70，见下表）；锁的重入与回收兜底 3 条（T71–T73）与核心默认值 1 条（T74）见下表。**逐条冲突判定 + add 参与冲突检测 + 编号不复用**这轮改造新增 16 条：单元 12 条（T75–T86，见下表）与真实子进程并发 4 条（T87–T90，见下表，测试文件 tests/concurrency.test.mjs，脚本写在系统临时目录、用完即删，仓库里不留脚本）。**自动复盘触发时机迁到空闲边沿**这轮新增 19 条：纯状态机 8 条（T91–T98，tests/trigger.test.mjs）与调度器行为 11 条（T99–T109，tests/recap.test.mjs，见下表）。**独立对抗性验收发现的 8 个缺陷修复**这轮新增 7 条（T110–T116）：近似层只比正文、同领域不同经验不判冲突、相似度百分比封顶 100%、并发改名 + 同标题新增被检出、高水位标记归位且全文只留一份、无标记时编号复用一次的行为钉住（见下表）。语法自检：对每个 `lib/*.js` 跑 `node --check`；`package.json` 以 `JSON.parse` 校验。
+当前 213 条用例：212 通过 + 1 条在 Windows 上条件跳过（T47 文件权限位，见未验证清单 7）。其中「记录列表详情页」的只读条目清单新增 14 条（T133–T146，tests/entries.test.mjs）：空手册 / 正常手册（auto 与非 auto）/ 字段映射 / 四种降级（missing、unreadable、needs-session）/ maxEntries 透传 / 只读红线 / `GET /api/dsh-ace/entries` 的 200 体形状与源码级契约，以及 `/stats` catch 兜底改成同形零值 payload 的断言。其中只读统计 16 条（T117–T132）为「设置页只读手册统计」新增：纯函数与读盘降级 10 条（tests/stats.test.mjs）、统计块渲染 / 四种 reason 降级 / 刷新时机 6 条（tests/client-stats.test.mjs）。其中手册路径解析链 9 条（T48–T56）、跨进程文件锁 4 条（T57–T60）、跨进程锁覆盖整个读-改-写区间 3 条（T61–T63）为「手册默认本机共享层」改造新增；跨进程锁语义返工又新增 4 条（T64–T67，见下表）；并发冲突检测（快照 + 冲突报错）再新增 3 条（T68–T70，见下表）；锁的重入与回收兜底 3 条（T71–T73）与核心默认值 1 条（T74）见下表。**逐条冲突判定 + add 参与冲突检测 + 编号不复用**这轮改造新增 16 条：单元 12 条（T75–T86，见下表）与真实子进程并发 4 条（T87–T90，见下表，测试文件 tests/concurrency.test.mjs，脚本写在系统临时目录、用完即删，仓库里不留脚本）。**自动复盘触发时机迁到空闲边沿**这轮新增 19 条：纯状态机 8 条（T91–T98，tests/trigger.test.mjs）与调度器行为 11 条（T99–T109，tests/recap.test.mjs，见下表）。**独立对抗性验收发现的 8 个缺陷修复**这轮新增 7 条（T110–T116）：近似层只比正文、同领域不同经验不判冲突、相似度百分比封顶 100%、并发改名 + 同标题新增被检出、高水位标记归位且全文只留一份、无标记时编号复用一次的行为钉住（见下表）。语法自检：对每个 `lib/*.js` 跑 `node --check`；`package.json` 以 `JSON.parse` 校验。
 
 ## 用例总表
 
@@ -141,6 +141,49 @@ npm test
 | T114 | commitOps（缺陷 5） | 人手同时删掉最高编号条目与标记 → 该编号被**复用一次**，随后标记被重写为当前最大编号（也就是刚被复用的那个号），因此只会复用这一次（当前行为钉住，见未验证清单 12） | I2 | 同上 |
 | T115 | computeMergeSuggestions | 输出的 ratio 是对称比率且 **≤ 1**（不出现 >100% 的相似度） | I5c | tests/merge.test.mjs |
 | T116 | computeMergeSuggestions | 标题相近但正文不同的两条经验**不产生**建议（标题不进 BM25 层） | I5c | 同上 |
+| T117 | summarizePlaybook | 正常手册返回完整结构：entries 2、textChars 24、bytes 512、mtime `2026-10-05 08:30`、source.auto 1 of 2（autoRatio 0.5）、daily 固定 14 行、recent 按 updated 倒序 | I4 | tests/stats.test.mjs |
+| T118 | summarizePlaybook | 窗口外（14 天前）的条目不计入 daily，但仍计入规模与来源 | I4 | 同上 |
+| T119 | summarizePlaybook | recent 最多 5 条，同日按编号倒序 | I4 | 同上 |
+| T120 | summarizePlaybook | 空串 → `ok:true` + reason `no-entries`，daily 14 行全零，不抛错 | I4 | 同上 |
+| T121 | readPlaybookStats | 只有文档头、没有条目的文件也算 `no-entries` | I4 | 同上 |
+| T122 | readPlaybookStats | 文件不存在 → `ok:true` + reason `missing`（不抛 ENOENT） | I4 | 同上 |
+| T123 | collectPlaybookStats | 相对 playbookPath 在无会话上下文时 → `ok:true` + reason `needs-session`、pathKind `relative`，不抛错 | I4 | 同上 |
+| T124 | collectPlaybookStats | 绝对 playbookPath 走真实读盘，统计结果可用 | I4 | 同上 |
+| T125 | stats 工具函数 | formatStamp / dateKey / toDayKey / entryStamp / entryTextChars 的格式化与字数口径（title+condition+action+rationale，不含标记与元数据） | I4 | 同上 |
+| T126 | emptyStats ↔ summarizePlaybook | 空态与正常态的**字段集合一致**，客户端不必特判 | I4 | 同上 |
+| T127 | StatsBlock | 统计块渲染在 `.ace-set-sub` 之后、第一个 `.ace-set-row` 之前 | I4 | tests/client-stats.test.mjs |
+| T128 | StatsBlock | 规模快照（`35 / 100`）、来源构成（0%）、14 天条形图内联宽度（100%/33%/0%）、最近 5 条都按返回渲染，且**文本不含 helpful/harmful** | I4 | 同上 |
+| T129 | StatsBlock | `needs-session` 空态只多一行引导，路径仍回显、表单照常可用 | I4 | 同上 |
+| T130 | StatsBlock | `reason: 'unreadable'`（读盘失败）只多一行引导：命中 `statsReasonUnreadable` 自己的文案、不串到其它 reason、带文案的灰字行恰好 1 条；规模格/路径/表单照常渲染、不抛错；并做源码级断言 zh 与 en 两个字典都有该词条（渲染断言用的是 DICT 代理，词条缺失看不出来） | I4 | 同上 |
+| T131 | StatsBlock | `/stats` 404（宿主没重启）降级成一行灰字，不渲染规模格、不影响整页 | I4 | 同上 |
+| T132 | AceSection | 打开页面拉 1 次；点「刷新」变 2 次；保存设置成功后变 3 次 | I4 | 同上 |
+| T133 | collectEntries | 空手册 / 只有文档头 / 全文传空串 → `ok:true`、entries 空、total 0、maxEntries 透传，不抛错 | I4 | tests/entries.test.mjs |
+| T134 | collectEntries | 正常手册返回全部条目（顺序与手册一致），`auto` 恒为布尔（无 auto=true 的条目是 false 而非 undefined） | I4 | 同上 |
+| T135 | toEntry / collectEntries | 字段映射：正文取条目字段、created/updated/helpful/harmful 取 meta；每条 entry 的字段集合与**顺序**固定为 `id,title,condition,action,rationale,auto,created,updated,helpful,harmful`，且 id/正文/日期为 string、auto 为 boolean、helpful/harmful 为 number | I4 | 同上 |
+| T136 | toEntry | 缺字段的条目给空串/0/false；`toEntry({})` 稳定；元数据里 helpful 写成非数字回落 0（与 parseMeta 的 `Number(v) \|\| 0` 同口径） | I4 | 同上 |
+| T137 | readPlaybookEntries | 文件不存在 → `ok:true` + reason `missing`（不抛 ENOENT），entries 空、total 0 | I4 | 同上 |
+| T138 | readPlaybookEntries | 路径是目录（读不成文件）→ reason `unreadable`，不抛错 | I4 | 同上 |
+| T139 | collectPlaybookEntries | 相对 playbookPath 在无会话上下文时 → reason `needs-session`、pathKind `relative`、回显原路径，不抛错 | I4 | 同上 |
+| T140 | collectPlaybookEntries | 绝对 playbookPath 走真实读盘：条目可用、成功路径不带 reason、pathKind `absolute` | I4 | 同上 |
+| T141 | emptyEntries ↔ collectEntries | 降级体与成功体的字段集合一致（只多一个 reason），客户端不必特判 | I4 | 同上 |
+| T142 | maxEntries 透传 | 42 / 0 / null / 缺省 / 非数字 / NaN 全部按「有限数原样、其余 null」处理；`collectPlaybookEntries` 与 `emptyEntries` 都透传 | I4 | 同上 |
+| T143 | lib/entries.js 只读红线 | 剥掉注释后源码里**不出现** withLock / withExclusiveLock / withFileLock / writeFileAtomic / writeFile / writeFileSync / rename / appendFile / mkdir / commitOps；只 import playbook.js 与 playbook-path.js（不另写 Markdown 解析） | I4 | 同上 |
+| T144 | GET /entries | 200 响应体形状正确：`ok:true`、entries 全量、total 与 entries 长度一致、maxEntries 透传、每条 entry 字段集合固定（经 JSON 往返后仍成立） | I4 | 同上 |
+| T145 | GET /entries（源码级） | `lib/index.js` 的 /entries 分支：非 GET → `send(405, { error: 'method not allowed' })`；走 `collectPlaybookEntries(live.playbookPath, { …, maxEntries: live.maxEntries })` → `send(200, entries)`；catch 走 `emptyEntries(ENTRIES_REASONS.unreadable, …)`；分支里无 `send(500`、无 `throw`；`rejectionFor` 围栏排在分支之前；Content-Type 与 `cache-control: no-store` 与其它路由共用同一个 send | I4 | 同上 |
+| T146 | GET /stats（源码级） | catch 兜底不再是残缺的 `{ ok:true, reason:'unreadable' }`，改为 `emptyStats(STATS_REASONS.unreadable, { maxEntries: live.maxEntries })`（scale / daily / recent / source / windowDays / generatedAt 全在） | I4 | 同上 |
+| T147 | AceSection 设置 GET | 围栏 403 `{ error: 'forbidden' }`（或 HTTP 200 但 `ok !== true`）→ 一律 `failed` 文案，**不许**渲染成全默认值并在底栏声称「当前值来自插件行 Config」；正常返回照常渲染（回归：客户端不再把拒绝体喂给 adopt） | I4 | tests/client-stats.test.mjs |
+| T148 | AceSection Switch / FieldRow | 开关的可访问名恒为字段名（`aria-label` 不随状态变化），状态只走 `aria-checked`；FieldRow 的 label 用 `htmlFor` 指向真实存在的控件 id（input / role=switch / 带 `aria-labelledby` 的下拉触发按钮） | I4 | 同上 |
+| T149 | AceSection bounds | `maxEntries` / `autoRecapThreshold` / `autoRecapCooldownTurns` 的 input `min`/`max` 与文案里的数字都取自 `payload.bounds`，**默认值也取自 `payload.bounds.defaults.maxEntries`**（placeholder 与文案里的「默认」都由它填，客户端不留字面量）；bounds 缺失（老宿主）回退 1/1000 与默认 100 | I4 | 同上 |
+| T150 | AceSection inbox | 「待合并已满」文案的条数读 `/inbox` 的 `cap`（缺失回退 20），不再写死「20 条」 | I4 | 同上 |
+| T151 | EntriesPage reason 三分派 | `reason: 'missing'` → 「手册尚未创建，还没有任何记录」；`'needs-session'` → 「手册配置为相对路径，在无会话的 HTTP 面无法定位」；`'unreadable'` → 「手册文件读取失败」。三者互不相同，且 missing ≠ 空手册的 entriesEmpty 文案 | I4 | tests/client-entries.test.mjs |
+| T152 | EntriesPage 排序 | `updated` 是纯空白串时与「缺失日期」同等处理：升序/降序都恒定排末尾（旧实现不 trim，纯空白串会跑到升序最前） | I4 | 同上 |
+| T153 | AceSection tablist 键盘 | ArrowLeft / ArrowRight 循环切页、Home / End 跳首末，移动后焦点交给新选中的 tab；无关按键不切页（roving tabindex 必须有方向键，否则键盘用户只能停在当前 tab） | I4 | 同上 |
+| T154 | GET /inbox（源码级） | 读盘失败的降级体带 `reason: 'unreadable'`，字段集合与成功路径一致（降级体 = 成功体 + reason），不再与「真的没有待合并条目」同形被静默吞掉 | I4 | tests/entries.test.mjs |
+| T155 | GET /entries（源码级） | catch 降级体补 `pathKind: playbookPathKind(live.playbookPath)` 与 `playbookPath: live.playbookPath`，与成功体的 7 键同形 | I4 | 同上 |
+| T156 | GET /catalog（源码级） | 包了 try/catch：readCatalog 抛错时回 `{ ok:false, error, providers: [] }`（照抄 lib/catalog.js 的失败体形状），绝不因 async handler 抛错而无人写响应让浏览器挂到超时；非 GET 仍 405、成功路径仍在 | I4 | 同上 |
+| T157 | playbook applyOps `today()` | 写入的 created/updated 走**本地时区**口径（与 lib/stats.js 的 dateKey 一致）：把时钟钉在 `2026-03-04T23:30Z`、TZ=Asia/Tokyo 时 update/add 写入的都是 `2026-03-05`（UTC 口径会得 `2026-03-04`，落进前一天的统计桶） | I4 | tests/playbook.test.mjs |
+| T158 | summarizePlaybook recent | 同日按编号**数值**倒序：`ace-1000` 排在 `ace-999` 之前（字符串序会反过来）；`recentIdNumber` 取尾号，非 `ace-N` 编号回退 -1 | I4 | tests/stats.test.mjs |
+| T159 | 默认值唯一边界出处 | `describe()` 的 `bounds.defaults.maxEntries === DEFAULT_MAX_ENTRIES`（源码里不许写死数字），客户端不再有 `maxEntriesPlaceholder` 字面量与「默认 100 / default 100」文案；实测传 `bounds.defaults.maxEntries = 250`（再换 7）时渲染出的 placeholder 真的跟着变，字典 zh/en 两侧都用 `{d}` 占位 | I4 | tests/client-stats.test.mjs · tests/entries.test.mjs |
 
 ## 迁移矩阵
 
@@ -190,3 +233,5 @@ npm test
 10. **会写手册的三条写入路径把冲突回报给用户的那句话，未在真实宿主上目视确认**：`ace_curate` 的 `conflicts` 字段与 render 文案、自动复盘与 `/ace` **默认复盘分支**共用的 `sendNotice`（首选 `agent.followup`，退回 `agent.inject`），代码路径与文案已定（见 lib/index.js 的 `renderConflictNotice`/`conflictMessage`/`sendNotice`），但「用户真的看到了这条提示」要装进 DSH 后触发一次并发 curate 才能确认。（`/ace review` 不在其中：它只读 merge-inbox 并把条目注入对话，既不写手册也不做冲突判定。）
 11. **自动复盘在真实宿主上「真的落盘」仍未验证**：原实现的疑点已定位并修掉——`agent.runMaintenance` 只在 idle 相位合法（宿主 `~\@deepseek-ai\dsh-agent-loop\lib\index.js:823`），而 `agent/turn-stopping` 派发时 phase 是 running（同文件 `:939`），所以自动复盘此前必然以「already has active work」失败（共享手册里 `auto=true` 条目数为 0 与该推断一致）。现在触发点已迁到 `agent/status` 报 idle 的空闲边沿（见 DESIGN.md I9），T99–T109 只覆盖纯逻辑与模拟宿主：**真实宿主上跑一次自动复盘、确认手册里真的多出 `auto=true` 条目，仍需装进 DSH 后实测**（本任务环境不允许重启宿主）。同理，idle 边沿与新唤醒之间的竞态退避（`already has active work` → 放回队列 → 下一个 idle 边沿重试）在真实宿主上的实际发生频率也未观测。
 12. **条目编号在「人同时删最高编号条目 + 删高水位标记」时会复用一次**（已知限制，不修）：历史最大值只存在于手册文档头的那行 `<!-- ace:id-highwater: N -->` 标记里，条目被删掉之后无法从文件本身恢复，因此这两种删除同时发生时该编号可能被复用一次（随后标记被重写成当前最大编号，也就是刚被复用的那个号，因此只会复用这一次）。T114 把这一当前行为钉住；README「已知限制」与 DESIGN.md 的 I2 都已按此措辞写明。**没有**实现「从别处猜回历史最大值」的机制——那需要额外持久化历史，会超出增量演化的边界。
+13. **只读统计端点 `GET /api/dsh-ace/stats` 的真实宿主返回未做 HTTP 验证**：改动落在 `lib/index.js` 的 webServer 前缀路由里，必须重启 DSH 才生效（当前 GUI 就跑在这个进程上，本任务环境不允许重启宿主）。已做的替代验证是纯函数与客户端两侧的单测（T117–T132）：返回值形状、四种降级（needs-session / missing / no-entries / unreadable）、以及统计块在 404 时的降级都钉住了，但**端点本体的真实响应体、以及统计块在真实浏览器里的观感（CSS 布局、14 天条形的宽度与对齐）未目视**。等宿主重启后人工确认：打开设置页 → 「ACE 手册」，应看到条目数显示为 `N / 100`、路径为本机共享手册绝对路径、14 天条形图有非零行、auto 占比 0% 且旁边有「自动归档尚未落盘过」灰字。
+14. **只读条目端点 `GET /api/dsh-ace/entries` 的真实宿主返回未做 HTTP 验证**：改动同样落在 `lib/index.js` 的 webServer 前缀路由里，必须重启 DSH 才生效。已做的替代验证是 T133–T145：纯函数与只读 IO 直接跑（分支本体只做「调它 + send」），分支的围栏顺序、405、错误体与 Content-Type 用源码级断言钉住；**端点本体的真实响应体、以及「记录列表详情页」在真实浏览器里的渲染未目视**。等宿主重启后人工确认：`GET /api/dsh-ace/entries` 应返回 `{ ok:true, entries:[…全量…], total:N, maxEntries:100, pathKind, playbookPath }`；手册路径为相对路径时应返回 `{ ok:true, reason:'needs-session', entries:[], total:0, maxEntries:100 }` 而不是 500。
