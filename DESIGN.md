@@ -12,7 +12,9 @@ last_reviewed: 2026-10-21
 **结论：dsh-ace 只负责「手册的读、盘、并」三件事，不负责任务执行本身，也不做任何检索/向量化。**
 
 - 管：手册文件生命周期（不存在则初始化）、条目结构与 id 分配、增量操作的事务校验、并发与原子写、Reflector/Curator 的 LLM 调用与提示词、agent 何时复盘的系统提示。
-- 不管：手册内容的质量判断（交给 LLM 与人）、跨工作区的手册共享、手册的自动调度（何时复盘由 agent 按系统提示自行判断）。
+- 不管：手册内容的质量判断（交给 LLM 与人）、手册的自动调度（何时复盘由 agent 按系统提示自行判断）。
+- 手册**位置**由配置决定（见下节「手册文件位置：默认本机共享层」）：默认一本手册跨工作区共用；填相对路径则退化为该工作区私有一本。
+- 不管：**两层手册的自动合并读**（共享层 + 项目私有层同时读）。理由是硬约束而非偏好：`nextId` 是单本内 max+1（lib/playbook.js:130-137），合并视图里会撞号；`maxEntries` 容量会被两层一起吃满；curate 的落点是单值，刚写进共享层的条目下次合并读可能读不到。**任何时刻只有一本手册被读写。**
 
 ## 依赖关系
 
@@ -23,7 +25,7 @@ last_reviewed: 2026-10-21
 | `ctx.tools` | 注册三个模型可见工具 | 宿主服务（inject 声明） |
 | `ctx.systemPrompt` | 注册「何时复盘」提示段 | 宿主服务（inject 声明） |
 | `ctx.llm` | Reflector/Curator 的单次 LLM 调用 | 宿主服务（inject 声明） |
-| `ctx.workingDirectory` | 相对手册路径 → 会话工作目录 | 宿主服务（inject 声明） |
+| `ctx.workingDirectory` | 相对手册路径 → 会话工作目录（只有相对路径这一形态需要它；绝对路径与共享层不需要会话上下文） | 宿主服务（inject 声明） |
 | `@deepseek-ai/schemastery` | Config schema（cordis 以 `~standard.vendor` 识别） | 宿主提供的 peer 依赖 |
 | `@deepseek-ai/dsh-tools` | `defineTool` 构造工具定义 | 宿主提供的 peer 依赖 |
 
@@ -36,19 +38,20 @@ Node 内置模块仅 `node:fs`、`node:fs/promises`、`node:path`、`node:os`、
 | 形态 | 对象 | 说明 |
 | --- | --- | --- |
 | 生命周期型 | `PlaybookEntry` | 条目（id/title/condition/action/rationale/meta/extraLines），随 curate 演化 |
-| 句柄型 | 手册文件路径 | 唯一持久化句柄；相对路径在调用时经会话工作目录解析 |
+| 句柄型 | 手册文件路径 | 唯一持久化句柄；由 `playbookPath` 经 `lib/playbook-path.js` 解析：绝对路径（含 `~` 前缀）原样用、相对路径经会话工作目录 join（工作区私有）、空串/缺省 = `<DSH home>/ace/playbook.md`（本机共享） |
 | 不可变值 | `ops`（curate 入参） | 操作批：进入 `applyOps` 后先整批校验再应用，校验期间不改副本 |
-| 受控操作 | `withLock` / `writeFileAtomic` | 手册文件只经这两个受控入口变更 |
+| 受控操作 | `withExclusiveLock` / `writeFileAtomic` | 手册文件只经这两个受控入口变更；`withExclusiveLock` = `withLock`（同进程 per-path 串行）→ `withFileLock`（跨进程 `<file>.lock`），锁覆盖整个「读-改-写」区间；`writeFileAtomic` 内部再进 `withFileLock` 时按重入处理（不重复加锁）；跨进程锁不抢占活着的持锁者（I5b） |
 
 条目落盘格式与解析规则见 README「首次使用」；条目内人手写的无法识别行挂在 `extraLines` 原样保留。
 
 ### 不变量
 
 - I1 不存在把手册整本替换为新文本的代码路径或提示词指令——演化只经 add/update/remove；
-- I2 条目 id 在同一手册内唯一，且新 id 恒为现有最大编号 +1（编号不复用）；
+- I2 条目 id 在同一手册内唯一，且新 id 恒为现有最大编号 +1（编号不复用）。**适用前提：一本手册一份编号空间**——共享层与工作区私有层并存时，各自独立编号，`ace-001` 在两层里可能指向不同条目（这也是不做两层合并读的原因之一，见「职责与边界」）；
 - I3 `applyOps` 是事务式的：任一操作校验失败则整批拒绝，条目数组保持不变；
 - I4 手册条目数不得超过 `maxEntries`，违反即整批拒绝并在错误信息里给出可合并的旧条目；
-- I5 同一路径上的手册「读-改-写」串行执行（per-path 互斥，仅在单 DSH 进程内有效；多实例共享同一 workspace 时为 last-writer-wins，rename 的原子性保证文件不会写坏），不同路径互不阻塞；
+- I5 同一路径上的手册「读-改-写」串行执行，**同进程与跨进程都成立**：`withExclusiveLock`（lib/playbook.js:526）= `withLock`（per-path Promise 链，进程内，不同路径互不阻塞）→ `withFileLock`（跨进程 `<file>.lock`，`O_EXCL` 创建、内含 pid + 时间戳 + nonce、抢不到带退避重试）。**两层锁都有重入保护**：`withLock` 与 `withFileLock` 各用一套 AsyncLocalStorage 记录「本次调用链已持有的锁」，同一路径上再取一次锁直接执行（否则嵌套 `withExclusiveLock(file)` 会自死锁）；不同路径仍各走各的链，互不阻塞。**锁的持有期覆盖整个读-改-写区间**（读手册 → 算新条目 → 落盘都在锁内）；区间内的 `writeFileAtomic` 靠 AsyncLocalStorage 识别为重入，不会自死锁；rename 的原子性仍保证文件不会写坏。**锁区间内只允许纯计算——任何 LLM/网络调用必须在锁外**（`ace_curate` 的 Curator 提案在锁外生成，锁内只重新读最新手册、查冲突、校验、落盘）。跨进程锁的回收语义见下一条 I5b：
+- I5b 跨进程锁**永不抢占活着的持锁者**：`withFileLock`（lib/playbook.js:439）读到锁内容里的有效 pid 且该进程仍存活（`process.kill(pid, 0)` 不抛错）时一律等待，最多重等到 `LOCK_TIMEOUT_MS`（30s）后抛错——**失败而不是丢写**。可回收的只有两种锁：① 持锁进程已死（`ESRCH`）；② 锁内容读不出有效 pid（损坏/写到一半）且 mtime 已远超 `LOCK_STALE_MS`（10s）。回收权靠 `rename` 取得（`<file>.lock` → `<file>.lock.stale-<随机>`，拿到名字的那方才删），因此不会误删新主人的锁；`finally` 只删**自己那把**锁（核对 payload 里的 nonce，不符就不删）。误抢到活锁时靠 `restoreLock` 把它原样放回：优先 `link` + `unlink`，**任何 `link` 失败（含 Windows 跨卷的 ENOENT）都走「位置未被占住才放回」的兜底**（`open(lockPath, 'wx')` 独占创建，抢不到就说明位置已被新主人占住，绝不覆盖）。**这条取代了旧语义**（旧实现用「时间超期」判陈旧并直接 `rm`），旧语义在共享一本手册时必然丢写：慢 LLM 调用超过 10s 后活锁被抢，先落地的那份写被覆盖，且原持锁者退出时会把新主人的锁删掉，导致临界区重叠。**多实例共享同一本手册时仍可能出现「后写者覆盖先写者」**——I5 只保证「读-改-写区间不重叠」，跨实例的语义冲突由 `detectConflicts`（lib/playbook.js）显式报错「手册在本次复盘期间被其他进程改动，请重试」解决，不靠抢锁解决；
 - I6 手册文件对读者原子可见：只可能是完整旧版或完整新版（临时文件 + rename），不存在半截状态；
 - I7 人手编辑的批注行不因机器写入而丢失（extraLines 往返保真）；
 - I8 LLM 原始输出不得直接写入手册：必须经 `extractJsonObject` 解析且字段类型校验通过。
@@ -59,10 +62,10 @@ Node 内置模块仅 `node:fs`、`node:fs/promises`、`node:path`、`node:os`、
 
 | 接口 | 形态 | 要点 |
 | --- | --- | --- |
-| `ace_playbook` | 工具 | `id` 精确过滤；`query` 以片段（空白/标点拆分，汉字块 2-gram）为 term 对当前条目做 BM25 排序（k1=1.2, b=0.75；idf=log((N-df+0.5)/(df+0.5)+1)；tf 在条目四字段拼接文本上计，实现在 `matchEntries`/`querySegments`，lib/playbook.js）；命中条目按得分降序（同分保持原序），无有效片段或全 0 分时整本兜底；只读，`isConcurrencySafe` 为真 |
-| `ace_reflect` | 工具 | `summary` 必填、`outcome` 可选；LLM 复盘返回候选数组；120s 协作超时 |
-| `ace_curate` | 工具 | `ops` 批量增量；`dedupe` 默认对 add 做 LLM 去重（判 new/update/drop）；互斥锁内 读→去重→校验→原子写 |
-| `Config` | 配置 | 五字段见 README「配置」表 |
+| `ace_playbook` | 工具 | `id` 精确过滤；`query` 以片段（空白/标点拆分，汉字块 2-gram）为 term 对当前条目做 BM25 排序（k1=1.2, b=0.75；idf=log((N-df+0.5)/(df+0.5)+1)；tf 在条目四字段拼接文本上计，实现在 `matchEntries`/`querySegments`，lib/playbook.js）；命中条目按得分降序（同分保持原序），无有效片段或全 0 分时整本兜底；只读，`isConcurrencySafe` 为真。**首读即建文件**（手册不存在时建出带文档头的空手册）这一小段在写锁内完成（`withExclusiveLock`），其余过滤计算在锁外 |
+| `ace_reflect` | 工具 | `summary` 必填、`outcome` 可选；LLM 复盘返回候选数组；120s 协作超时。同样：首读建文件在锁内，LLM 在锁外 |
+| `ace_curate` | 工具 | `ops` 批量增量；`dedupe` 默认对 add 做 LLM 去重（判 new/update/drop）；**两段式**：锁外读快照 + 跑 Curator 的 LLM → 锁内重读最新手册 + 冲突检测 + 校验 + 原子写（LLM 不在锁区间内，见 I5） |
+| `Config` | 配置 | 字段与默认值见 README「配置」表（`playbookPath` 默认空串 = 本机共享手册，`maxEntries` 默认 100） |
 | 系统提示段 `ace-playbook` | order 860 | `autoReflect` 为 false 时不注册 |
 
 模型路由解析链：配置了 `reflectProvider`+`reflectModel` 则覆盖优先；否则 `session.requestHeader().config` → `agent.options`（与会话同模型）；解析不出则报错要求显式配置。
@@ -86,6 +89,24 @@ GET /api/dsh-ace/catalog
 ```
 
 数据来自 `ctx.llm.listProviders()`（同步）+ 逐个 `ctx.llm.listModels(id)`（异步），组装逻辑在 `lib/catalog.js`（`buildCatalog`，纯逻辑可测）。**逐个 provider 各自 try/catch 并带 15s 超时**：某个 provider 抛错或卡住，只让它自己的 `models` 为 `[]` 并附一条 `error` 字符串，接口整体仍 `ok: true` —— 设置页其余字段因此永远可用。围栏与 `/settings` 一致（先 `rejectionFor` 做回环同源校验），只认 GET，其他方法 405。宿主还没重启到带这个接口的版本时前端拿到 404，两个下拉面板里显示一行错误提示，不阻塞页面。
+
+### 手册文件位置：默认本机共享层
+
+**结论：手册默认只有一本、放在 `<DSH home>/ace/playbook.md`（本机即 `C:\Users\adkun\.dsh\ace\playbook.md`），跨工作区共用；填相对路径才退化成该工作区私有。**
+
+解析由 `lib/playbook-path.js` 的 `resolvePlaybookFile(configured, { ctx, workingDirectory, env, home })` 完成（纯函数，env/home 注入可测）：
+
+| 优先级 | `playbookPath` 形态 | 结果 | 典型用途 |
+| --- | --- | --- | --- |
+| ① | 绝对路径；`~` / `~/` / `~\` 前缀 | 原样使用（`~` 展开到 home） | 点名某一份手册 |
+| ② | 相对路径（如 `.ace/playbook.md`） | 相对**会话工作目录** join | 该工作区私有，可随仓库进 git |
+| ③ | 空串 / 缺省 | `<DSH home>/ace/playbook.md` | 本机共享（默认） |
+
+`<DSH home>` 的解析链：`ctx.get('profileContext')?.home` → `$DSH_HOME` → `~/.dsh`（与 `lib/settings-path.js` 同范式；`~` 展开语义对齐 `@deepseek-ai/dsh-home-paths` `lib/index.js:70` 的 `expandHomePath`，home 解析对齐同文件 `:109` 的 `resolveDshHome`）。
+
+只有 ② 需要会话上下文：HTTP 面（`/inbox`）没有会话工作目录，相对路径在那里解析不到文件，按「暂无可看待合并条目」返回空列表；①③ 在 HTTP 面照常解析——共享层的 merge-inbox 因此能被设置页读到。
+
+父目录不存在的风险由 `writeFileAtomic` 内部的 `fs.mkdir(dir, { recursive: true })`（lib/playbook.js:534-546）兜住：共享层的 `<DSH home>/ace` 首次使用时并不存在，`readOrInitPlaybook`（lib/playbook.js:614-624）的 ENOENT 分支会立刻原子写，靠的就是这句 mkdir。
 
 ### 设置文件位置：为什么跟随 profile
 
@@ -111,7 +132,7 @@ GET /api/dsh-ace/catalog
 **结论：每条红线都能指到载体与依据，改动前逐条对照。**
 
 - 手册只增量演化，无整本重写路径——来源：ACE 方法论（细节磨平问题）——载体：`lib/prompts.js` 两条 system 提示词 + `applyOps` 仅暴露三操作（机检：TESTING 用例）[评]
-- 并发 curate 不写坏手册——来源：验收标准 3——载体：`withLock` per-path Promise 链（机检：withLock 三条用例）[机检]
+- 并发 curate 不写坏手册——来源：验收标准 3——载体：`withExclusiveLock`（`withLock` per-path Promise 链 + `withFileLock` 跨进程 `<file>.lock`，锁覆盖整个读-改-写区间；跨进程锁不抢占活着的持锁者，超时失败而非覆盖）（机检：withLock 三条、withFileLock 八条、withExclusiveLock 两条、writeFileAtomic 一条）[机检]
 - 手册写入原子可见——来源：I6——载体：`writeFileAtomic`（tmp + rename）（机检：读写往返用例）[机检]
 - LLM 输出结构化后才落盘——来源：I8——载体：`extractJsonObject` + 字段过滤（评）[评]
 - 失败不产生半截状态：curate 任一步抛错则手册不变（锁内先校验后写）——载体：`applyOps` 事务校验（机检：事务式用例）[机检]

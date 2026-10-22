@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { parsePlaybook, serializePlaybook, applyOps, digestEntries, withLock, writeFileAtomic, readOrInitPlaybook, matchEntries, querySegments } from '../lib/playbook.js';
+import { parsePlaybook, serializePlaybook, applyOps, digestEntries, withLock, withExclusiveLock, writeFileAtomic, readOrInitPlaybook, readPlaybookSnapshot, detectConflicts, restoreLock, matchEntries, querySegments, withFileLock, LOCK_STALE_MS } from '../lib/playbook.js';
 
 const E = (id, title, condition, action, rationale, overrides = {}) => ({
   id, title, condition, action, rationale: rationale || '',
@@ -178,7 +178,194 @@ test('writeFileAtomic + readOrInitPlaybook：真实文件读写与初始化', as
   await writeFileAtomic(file, serializePlaybook({ header: second.header, entries: r.entries }));
   const third = await readOrInitPlaybook(file);
   assert.equal(third.entries.length, 1);
-  await fs.rm(dir, { recursive: true, force: true });
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+// —— 跨进程文件锁（withFileLock / <file>.lock） ——
+
+test('withFileLock：正常加锁后执行、结束即释放（不残留 .lock）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  const lock = file + '.lock';
+  let sawLock = false;
+  const r = await withFileLock(file, async () => {
+    sawLock = (await fs.readFile(lock, 'utf8')).includes('"pid"');
+    return 'done';
+  });
+  assert.equal(r, 'done');
+  assert.ok(sawLock, '临界区内应存在 .lock 且含 pid');
+  await assert.rejects(fs.stat(lock), /ENOENT/, '锁文件应在 finally 里清理');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withFileLock：持锁进程已死的陈旧锁被下一个写者回收（时间戳再旧也回收）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  const lock = file + '.lock';
+  // 模拟上一个进程崩溃：锁文件留着，时间戳远早于 staleMs。
+  await fs.writeFile(lock, JSON.stringify({ pid: 999999, time: Date.now() - LOCK_STALE_MS - 5000 }), 'utf8');
+  const t0 = Date.now();
+  const r = await withFileLock(file, async () => 'reclaimed');
+  assert.equal(r, 'reclaimed');
+  assert.ok(Date.now() - t0 < 5000, '死进程留下的锁应立刻回收，而不是等到超时');
+  await assert.rejects(fs.stat(lock), /ENOENT/);
+  // 内容读不懂的锁文件（写到一半）也能靠 mtime 回收：把 mtime 改到很久以前。
+  await fs.writeFile(lock, '{not json', 'utf8');
+  const old = new Date(Date.now() - LOCK_STALE_MS - 5000);
+  await fs.utimes(lock, old, old);
+  assert.equal(await withFileLock(file, async () => 'reclaimed-2'), 'reclaimed-2');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+// —— 回归：新锁语义（活着的持锁者永不被抢 + nonce 校验 + rename 回收） ——
+
+test('withFileLock：持锁进程存活时，即使持锁超过 staleMs 也不被抢（等到超时才失败）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  const lock = file + '.lock';
+  let entered = false;
+  // 第一个写者：持锁 800ms（远超注入的 staleMs=50ms），pid 是本进程 → 活着。
+  const holder = withFileLock(file, async () => {
+    await new Promise((r) => setTimeout(r, 800));
+    return 'held';
+  }, { staleMs: 50, timeoutMs: 5000 });
+  // 第二个写者：不得进入临界区，只能等到超时抛错。
+  await new Promise((r) => setTimeout(r, 100));
+  await assert.rejects(
+    withFileLock(file, async () => { entered = true; return 'stole'; }, { staleMs: 50, timeoutMs: 150 }),
+    /等待手册写锁超时/,
+    '活着的持锁者不应被抢：第二个写者应等到超时抛错',
+  );
+  assert.equal(entered, false, '第二个写者绝不能进入临界区');
+  assert.equal(await holder, 'held');
+  await assert.rejects(fs.stat(lock), /ENOENT/, '结束后不应残留 .lock');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withFileLock：持锁进程已死时锁可被回收并正常取得（不必等满 staleMs）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  const lock = file + '.lock';
+  // pid 不存在（被强杀）；时间戳很新 —— 靠「进程已死」判定回收，与时间无关。
+  await fs.writeFile(lock, JSON.stringify({ pid: 999999, time: Date.now(), id: 'dead-owner' }), 'utf8');
+  const t0 = Date.now();
+  const r = await withFileLock(file, async () => 'reclaimed', { staleMs: 60000, timeoutMs: 5000 });
+  assert.equal(r, 'reclaimed');
+  assert.ok(Date.now() - t0 < 3000, '死进程的锁应立刻回收');
+  await assert.rejects(fs.stat(lock), /ENOENT/);
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withFileLock：三写者并发且其中一个持锁超过 staleMs —— 临界区不重叠、不丢写、无 .lock 残留', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'counter.txt');
+  await fs.writeFile(file, '0', 'utf8');
+  let inCritical = 0;
+  let maxConcurrent = 0;
+  // 三个写者都在锁内做读-改-写；其中第一个刻意持锁 300ms（远超 staleMs=50ms）。
+  const bump = (label, holdMs) => withFileLock(file, async () => {
+    inCritical += 1;
+    maxConcurrent = Math.max(maxConcurrent, inCritical);
+    try {
+      const n = Number(await fs.readFile(file, 'utf8'));
+      await new Promise((r) => setTimeout(r, holdMs));
+      await fs.writeFile(file, String(n + 1), 'utf8');
+    } finally {
+      inCritical -= 1;
+    }
+    return label;
+  }, { staleMs: 50, timeoutMs: 10000 });
+  await Promise.all([bump('A', 300), bump('B', 20), bump('C', 20)]);
+  assert.equal(maxConcurrent, 1, '临界区绝不能重叠');
+  assert.equal(await fs.readFile(file, 'utf8'), '3', '三次读-改-写应全部生效（不丢写）');
+  const left = await fs.readdir(dir);
+  assert.deepEqual(left, ['counter.txt'], '结束后不应残留 .lock');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withFileLock：锁被回收后，原持锁者的 finally 不会删掉新主人的锁', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  const lock = file + '.lock';
+  // 模拟：我的锁被别人回收了，新主人已经建了新锁（nonce 不同）。
+  const holder = withFileLock(file, async () => {
+    await fs.rename(lock, lock + '.stale-sim');           // 别人回收走了我的锁
+    await fs.writeFile(lock, JSON.stringify({ pid: process.pid, time: Date.now(), id: 'other-owner' }), 'utf8');
+    return 'ok';
+  });
+  assert.equal(await holder, 'ok');
+  // 我的 finally 已执行：它必须核对 nonce，发现不是自己的锁 → 不删。
+  const still = await fs.readFile(lock, 'utf8');
+  assert.ok(still.includes('other-owner'), '原持锁者不应删掉新主人的锁');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withFileLock：并发两个写者串行，读-改-写不丢写', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'counter.txt');
+  await fs.writeFile(file, '0', 'utf8');
+  // 每个写者：读 → 等一会儿（放大竞态窗口）→ 写回 +1。锁生效则两次都算上。
+  const bump = () => withFileLock(file, async () => {
+    const n = Number(await fs.readFile(file, 'utf8'));
+    await new Promise((r) => setTimeout(r, 60));
+    await fs.writeFile(file, String(n + 1), 'utf8');
+  });
+  await Promise.all([bump(), bump(), bump()]);
+  assert.equal(await fs.readFile(file, 'utf8'), '3', '三次读-改-写应全部生效（串行不丢写）');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withExclusiveLock：锁覆盖整个读-改-写区间（区间内嵌 writeFileAtomic 不自死锁）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  // 区间内调用 writeFileAtomic —— 它内部还会再进一次 withFileLock，
+  // 必须被识别为重入（否则自己等自己 → 超时）。
+  const r = await withExclusiveLock(file, async () => {
+    await writeFileAtomic(file, '# 手册\n');
+    return 'ok';
+  });
+  assert.equal(r, 'ok');
+  assert.equal(await fs.readFile(file, 'utf8'), '# 手册\n');
+  const left = await fs.readdir(dir);
+  assert.deepEqual(left, ['playbook.md'], '区间结束后不应残留 .lock');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withExclusiveLock：并发写者各自读-改-写不丢写（区间在锁内）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'counter.txt');
+  await fs.writeFile(file, '0', 'utf8');
+  // 模拟真实写路径：读 → 算 → 写回，整段都在锁内。
+  const bump = () => withExclusiveLock(file, async () => {
+    const n = Number(await fs.readFile(file, 'utf8'));
+    await new Promise((r) => setTimeout(r, 60));
+    await fs.writeFile(file, String(n + 1), 'utf8');
+  });
+  await Promise.all([bump(), bump(), bump()]);
+  assert.equal(await fs.readFile(file, 'utf8'), '3', '三次读-改-写应全部生效（串行不丢写）');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('withFileLock：持锁进程已死（pid 不存在）的锁被立刻回收，不必等满 staleMs', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  const lock = file + '.lock';
+  // 时间戳还很新（未过 staleMs），但 pid 是一个不存在的进程 —— 被强杀后留下的锁。
+  await fs.writeFile(lock, JSON.stringify({ pid: 999999, time: Date.now() }), 'utf8');
+  const t0 = Date.now();
+  assert.equal(await withFileLock(file, async () => 'reclaimed'), 'reclaimed');
+  assert.ok(Date.now() - t0 < 5000, '死进程留下的锁应立刻回收');
+  await assert.rejects(fs.stat(lock), /ENOENT/);
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('writeFileAtomic：写入后不残留 .lock 与临时文件', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-lock-'));
+  const file = path.join(dir, 'playbook.md');
+  await writeFileAtomic(file, 'x');
+  const left = await fs.readdir(dir);
+  assert.deepEqual(left, ['playbook.md']);
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 // —— T19-T23：query 片段 OR 匹配（matchEntries/querySegments） ——
@@ -245,4 +432,103 @@ test('querySegments：空/纯标点 query 无片段；matchEntries 原样返回�
   const entries = [E('ace-001', 't', 'c', 'a', '')];
   const hit = matchEntries(entries, '，。！');
   assert.equal(hit.length, 1);
+});
+
+// —— T68-T70：并发冲突检测（锁外快照 → 锁内最新手册的语义冲突） ——
+
+test('readPlaybookSnapshot：只读不写盘；文件不存在时返回空条目而不是创建文件', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-snap-'));
+  const file = path.join(dir, 'playbook.md');
+  const snap = await readPlaybookSnapshot(file);
+  assert.deepEqual(snap.entries, []);
+  assert.ok(snap.header.length > 0, '缺省文档头应存在');
+  // 关键：只读，不初始化
+  await assert.rejects(fs.stat(file), /ENOENT/);
+  // 有文件时读到条目
+  await fs.writeFile(file, SAMPLE, 'utf8');
+  const snap2 = await readPlaybookSnapshot(file);
+  assert.equal(snap2.entries.length, 2);
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('detectConflicts：无冲突返回 null（目标条目在快照与最新手册中完全一致）', () => {
+  const entries = [E('ace-001', '编辑前先读', '修改既有文件之前', '先 read 再动手', '')];
+  const snapshot = { entries };
+  const latest = { entries };
+  assert.equal(detectConflicts(snapshot, latest, [{ op: 'update', id: 'ace-001', title: 'x' }]), null);
+  assert.equal(detectConflicts(snapshot, latest, [{ op: 'add', title: '新条目' }]), null);
+});
+
+test('detectConflicts：目标条目在复盘期间被删除 / 被修改 / 新出现 —— 明确报错而不是静默覆盖', () => {
+  const snapshot = { entries: [E('ace-001', '标题A', '条件A', '做法A', '')] };
+  // 被删除
+  const deleted = detectConflicts(snapshot, { entries: [] }, [{ op: 'update', id: 'ace-001' }]);
+  assert.match(deleted, /手册在本次复盘期间被其他进程改动，请重试/);
+  assert.match(deleted, /已被删除/);
+  // 被修改（内容不同）
+  const modified = detectConflicts(snapshot, { entries: [E('ace-001', '标题B', '条件A', '做法A', '')] }, [{ op: 'update', id: 'ace-001' }]);
+  assert.match(modified, /已被修改/);
+  // 快照里没有、复盘期间新出现
+  const appeared = detectConflicts({ entries: [] }, { entries: [E('ace-002', 'x', 'y', 'z', '')] }, [{ op: 'remove', id: 'ace-002' }]);
+  assert.match(appeared, /是复盘期间新出现的/);
+  // 快照里没有、最新也没有 → 交给 applyOps 按既有规则报「id 不存在」，这里不算冲突
+  assert.equal(detectConflicts({ entries: [] }, { entries: [] }, [{ op: 'update', id: 'ace-404' }]), null);
+});
+
+// —— T71-T73：锁的重入与回收兜底 ——
+
+test('withExclusiveLock：同路径嵌套调用不死锁（withLock 重入保护）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-reentrant-'));
+  const file = path.join(dir, 'playbook.md');
+  const order = [];
+  await withExclusiveLock(file, async () => {
+    order.push('outer-start');
+    // 同路径再取一次同一把锁：必须直接执行，不能自死锁
+    await withExclusiveLock(file, async () => {
+      order.push('inner');
+    });
+    // 跨进程锁也要能重入（writeFileAtomic 内部会再取一次）
+    await writeFileAtomic(file, 'inner-write');
+    order.push('outer-end');
+  });
+  assert.deepEqual(order, ['outer-start', 'inner', 'outer-end']);
+  assert.equal(await fs.readFile(file, 'utf8'), 'inner-write');
+  // 不同路径仍互不阻塞（重入保护不改变这一点）
+  const other = path.join(dir, 'other.md');
+  const t0 = Date.now();
+  await Promise.all([
+    withExclusiveLock(file, async () => { await new Promise((r) => setTimeout(r, 80)); }),
+    withExclusiveLock(other, async () => { await new Promise((r) => setTimeout(r, 80)); }),
+  ]);
+  assert.ok(Date.now() - t0 < 150, '不同路径的两个锁应并行');
+  const left = (await fs.readdir(dir)).sort();
+  assert.deepEqual(left, ['playbook.md'], '不应有 .lock 残留');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('restoreLock：目标位置已被占住时绝不覆盖别人的锁', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-restore-'));
+  const from = path.join(dir, 'a.lock.stale-x');
+  const to = path.join(dir, 'a.lock');
+  await fs.writeFile(from, JSON.stringify({ pid: process.pid, time: Date.now(), id: 'mine' }), 'utf8');
+  await fs.writeFile(to, JSON.stringify({ pid: process.pid, time: Date.now(), id: 'other' }), 'utf8');
+  const ok = await restoreLock(from, to);
+  assert.equal(ok, false, '位置被占住时必须放弃放回');
+  const content = JSON.parse(await fs.readFile(to, 'utf8'));
+  assert.equal(content.id, 'other', '别人的锁不能被覆盖');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('restoreLock：跨卷（link 返回 ENOENT）也能把锁放回原位', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-restore2-'));
+  const from = path.join(dir, 'a.lock.stale-x');
+  const to = path.join(dir, 'a.lock');
+  const payload = JSON.stringify({ pid: process.pid, time: Date.now(), id: 'mine' });
+  await fs.writeFile(from, payload, 'utf8');
+  // 目标为空 → 无论 link 成功还是失败（跨卷 ENOENT），最终锁都必须回到 to，且内容一致
+  const ok = await restoreLock(from, to);
+  assert.equal(ok, true, '位置为空时应放回成功');
+  assert.equal(await fs.readFile(to, 'utf8'), payload);
+  await assert.rejects(fs.stat(from), /ENOENT/, '源文件应被清理');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });

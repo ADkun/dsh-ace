@@ -144,7 +144,7 @@ const CATALOG = [
   ] },
   { id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-4o', name: 'GPT-4o' }] },
 ];
-const DEFAULTS = { playbookPath: 'D:/w/.ace/playbook.md', autoReflect: true, reflectProvider: '', reflectModel: '', maxEntries: 50 };
+const DEFAULTS = { playbookPath: '', autoReflect: true, reflectProvider: '', reflectModel: '', maxEntries: 100 };
 
 function makeHost(initial = {}) {
   const settings = { ...DEFAULTS, ...initial };

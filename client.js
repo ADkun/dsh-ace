@@ -20,6 +20,8 @@ window.__ModuleLoader__.load({
     const ROUTE = '/api/dsh-ace/settings';
     // 模型目录（宿主 lib/index.js 的 GET /catalog）：两个下拉的数据源。
     const CATALOG_ROUTE = '/api/dsh-ace/catalog';
+    // 待合并复审列表（宿主 lib/index.js 的 GET /inbox）：只读，失败时静默降级。
+    const INBOX_ROUTE = '/api/dsh-ace/inbox';
     const inject = ['slots', 'locale'];
 
     const zh = {
@@ -30,7 +32,8 @@ window.__ModuleLoader__.load({
       subtitle: '可进化的操作手册（playbook）：复盘沉淀经验，任务前查阅',
       sectionTag: 'ACE PLAYBOOK',
       fieldPlaybookPath: '手册路径',
-      fieldPlaybookPathDesc: 'playbook.md 的位置；相对路径相对会话工作目录解析',
+      fieldPlaybookPathDesc: '留空 = 本机共享手册（<DSH home>/ace/playbook.md，跨工作区共用一本）；相对路径 = 该工作区私有（相对会话工作目录解析）；绝对路径（支持 ~ 开头）原样使用',
+      playbookPathPlaceholder: '留空 = 本机共享手册；相对路径 = 该工作区私有',
       fieldAutoReflect: '任务完成后提醒复盘',
       fieldAutoReflectDesc: '在系统提示里提醒 agent 主动调用 ace_reflect 复盘',
       fieldProvider: '复盘 provider 覆盖',
@@ -47,8 +50,23 @@ window.__ModuleLoader__.load({
       catalogLoading: '正在读取模型目录…',
       catalogFailed: '模型目录读取失败：宿主可能还没重启（其余字段照常可用）',
       warnPair: '只有 provider 与 model 两项都填才生效；只填一项会静默回落到会话模型。',
+      maxEntriesPlaceholder: '100',
       fieldMaxEntries: '手册容量上限',
-      fieldMaxEntriesDesc: '超出后 ace_curate 整批拒绝，并提示先合并旧条目',
+      fieldMaxEntriesDesc: '超出后 ace_curate 整批拒绝，并提示先合并旧条目（默认 100，可填 1–1000）',
+      fieldAutoRecap: '自动归档经验',
+      fieldAutoRecapDesc: '回合真正结束时由插件后台复盘并写入手册，不依赖模型主动调用',
+      fieldAutoRecapThreshold: '自动归档触发门槛',
+      fieldAutoRecapThresholdDesc: '回合内至少发生多少次改动类工具调用才触发自动复盘（0 表示每次都触发）',
+      fieldAutoRecapCooldownTurns: '自动归档冷却轮数',
+      fieldAutoRecapCooldownTurnsDesc: '距上次自动复盘至少隔几轮，避免每个回合都反复复盘（0 表示不冷却）',
+      fieldAutoReviewInbox: '自动复审待合并条目',
+      fieldAutoReviewInboxDesc: '预留开关，当前不生效：复审入口仍是设置页的「待合并复审」区块或对话里的 /ace review',
+      inboxTitle: '待合并复审',
+      inboxEmpty: '没有待合并的条目',
+      inboxHint: '在对话里输入 /ace review，模型会逐对读出两条全文并起草合并措辞',
+      inboxFull: '待合并已满（20 条），自动归档已暂停新增，请先清理',
+      inboxUnavailable: '待合并列表不可用：宿主可能还没重启',
+      inboxRatio: '相似度',
       on: '开',
       off: '关',
       saved: '已保存',
@@ -68,7 +86,8 @@ window.__ModuleLoader__.load({
       subtitle: 'An evolvable playbook: distil experience after tasks, consult before tasks',
       sectionTag: 'ACE PLAYBOOK',
       fieldPlaybookPath: 'Playbook path',
-      fieldPlaybookPathDesc: 'Where playbook.md lives; relative paths resolve against the session working directory',
+      fieldPlaybookPathDesc: 'Empty = the machine-wide shared playbook (<DSH home>/ace/playbook.md, one book across workspaces); a relative path = private to this workspace (resolved against the session working directory); an absolute path (a leading ~ works) is used as-is',
+      playbookPathPlaceholder: 'Empty = shared playbook; relative = private to this workspace',
       fieldAutoReflect: 'Remind to reflect after tasks',
       fieldAutoReflectDesc: 'Nudge the agent in the system prompt to call ace_reflect after real work',
       fieldProvider: 'Reflect provider override',
@@ -85,8 +104,23 @@ window.__ModuleLoader__.load({
       catalogLoading: 'Loading the model catalog…',
       catalogFailed: 'Could not load the model catalog: the host may not have restarted yet (other fields still work)',
       warnPair: 'The override only applies when both provider and model are set; with just one set it silently falls back to the session model.',
+      maxEntriesPlaceholder: '100',
       fieldMaxEntries: 'Playbook capacity',
-      fieldMaxEntriesDesc: 'ace_curate rejects whole batches beyond this and asks to merge old entries first',
+      fieldMaxEntriesDesc: 'ace_curate rejects whole batches beyond this and asks to merge old entries first (default 100, 1–1000)',
+      fieldAutoRecap: 'Archive experience automatically',
+      fieldAutoRecapDesc: 'Reflect and write into the playbook in the background once a turn truly ends, without relying on the model calling it',
+      fieldAutoRecapThreshold: 'Auto-archive trigger threshold',
+      fieldAutoRecapThresholdDesc: 'How many mutating tool calls in one turn are needed before an automatic recap fires (0 means every turn)',
+      fieldAutoRecapCooldownTurns: 'Auto-archive cooldown turns',
+      fieldAutoRecapCooldownTurnsDesc: 'Minimum turns since the last automatic recap, so it does not run every turn (0 means no cooldown)',
+      fieldAutoReviewInbox: 'Review pending merges automatically',
+      fieldAutoReviewInboxDesc: 'Reserved switch, currently inert: review via the "Pending merges" block on this page or by typing /ace review in the conversation',
+      inboxTitle: 'Pending merges',
+      inboxEmpty: 'No entries are waiting to be merged',
+      inboxHint: 'Type /ace review in the conversation and the model reads both entries in full and drafts the merge wording',
+      inboxFull: 'The pending-merge list is full (20 entries): auto-archiving has paused. Please clean up first',
+      inboxUnavailable: 'The pending-merge list is unavailable: the host may not have restarted yet',
+      inboxRatio: 'Similarity',
       on: 'On',
       off: 'Off',
       saved: 'Saved',
@@ -149,6 +183,19 @@ window.__ModuleLoader__.load({
       '.ace-pick-foot{border-top:1px solid #263140;padding-top:6px}',
       '.ace-pick-clear{color:#9fb2c5}',
       '.ace-set-warn{font-size:11px;line-height:1.6;color:#f0b429;padding:0 0 10px}',
+      // —— 待合并复审区块 ——
+      '.ace-inbox{padding:4px 0 6px;border-top:1px solid #1a2430}',
+      '.ace-inbox-title{font-size:13px;font-weight:600;color:#eaf2fb;margin:12px 0 2px}',
+      '.ace-inbox-note{font-size:11px;color:#8fa1b3;margin:0 0 8px;line-height:1.6}',
+      '.ace-inbox-empty{font-size:11px;color:#7d8fa1;padding:2px 0 4px}',
+      '.ace-inbox-full{font-size:11px;color:#f0b429;padding:2px 0 6px;line-height:1.6}',
+      '.ace-inbox-list{display:flex;flex-direction:column;gap:8px;margin:0 0 4px;padding:0;list-style:none}',
+      '.ace-inbox-item{background:#131a22;border:1px solid #263140;border-radius:8px;padding:9px 11px}',
+      '.ace-inbox-pair{font-size:12px;color:#dce6f1;line-height:1.7}',
+      '.ace-inbox-id{color:#5eead4}',
+      '.ace-inbox-title2{color:#eaf2fb}',
+      '.ace-inbox-arrow{color:#7d8fa1;padding:0 4px}',
+      '.ace-inbox-ratio{font-size:10px;color:#7d8fa1;padding-top:2px}',
     ].join('\n');
 
     function Switch(props) {
@@ -348,6 +395,10 @@ window.__ModuleLoader__.load({
       // failed 只影响两个下拉（面板里显示错误行），其余字段照常可用——
       // 宿主还没重启时 /catalog 会 404，这是正常状态。
       const [catalog, setCatalog] = React.useState({ status: 'loading', providers: [] });
+      // 待合并复审列表：status 取 'loading' | 'ready' | 'failed'。
+      // failed（宿主还没重启时会 404）只让这一区块变成一行灰字，其余字段照常可用 ——
+      // 范式同上面的 catalog failed，绝不能因此让整页报错。
+      const [inbox, setInbox] = React.useState({ status: 'loading', items: [], full: false });
 
       const adopt = (payload) => {
         const value = payload && typeof payload.value === 'object' && payload.value ? payload.value : {};
@@ -361,6 +412,25 @@ window.__ModuleLoader__.load({
           .then((response) => response.json())
           .then((payload) => { if (alive) adopt(payload); })
           .catch(() => { if (alive) setState({ status: 'failed' }); });
+        return () => { alive = false; };
+      }, []);
+
+      React.useEffect(() => {
+        let alive = true;
+        fetch(INBOX_ROUTE, { headers: { accept: 'application/json' } })
+          .then((response) => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+          })
+          .then((payload) => {
+            if (!alive) return;
+            if (!payload || payload.ok !== true || !Array.isArray(payload.items)) {
+              setInbox({ status: 'failed', items: [], full: false });
+              return;
+            }
+            setInbox({ status: 'ready', items: payload.items, full: payload.full === true });
+          })
+          .catch(() => { if (alive) setInbox({ status: 'failed', items: [], full: false }); });
         return () => { alive = false; };
       }, []);
 
@@ -429,16 +499,17 @@ window.__ModuleLoader__.load({
         onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
       });
 
-      const numProps = (field) => ({
+      const numProps = (field, min = 1, ph) => ({
         className: 'ace-set-input',
         type: 'number',
-        min: 1,
+        min,
         step: 1,
+        placeholder: ph || '',
         value: String(value(field) == null ? '' : value(field)),
         onChange: (e) => setDraftField(field, e.target.value),
         onBlur: () => {
           if (!Object.prototype.hasOwnProperty.call(draft, field)) return;
-          const n = Math.max(1, Math.floor(Number(draft[field])));
+          const n = Math.max(min, Math.floor(Number(draft[field])));
           if (!Number.isFinite(n) || n === Number(state.value[field])) return;
           commit(field, n);
         },
@@ -492,7 +563,7 @@ window.__ModuleLoader__.load({
         h('span', { className: 'ace-set-tag' }, t('sectionTag')),
         h('div', { className: 'ace-set-title' }, t('title')),
         h('div', { className: 'ace-set-sub' }, t('subtitle')),
-        h(FieldRow, { label: t('fieldPlaybookPath'), desc: t('fieldPlaybookPathDesc'), control: h('input', textProps('playbookPath', '.ace/playbook.md')) }),
+        h(FieldRow, { label: t('fieldPlaybookPath'), desc: t('fieldPlaybookPathDesc'), control: h('input', textProps('playbookPath', t('playbookPathPlaceholder'))) }),
         h(FieldRow, {
           label: t('fieldAutoReflect'), desc: t('fieldAutoReflectDesc'),
           control: h(Switch, {
@@ -533,7 +604,52 @@ window.__ModuleLoader__.load({
         }),
         // 只填一项时的显式警告：两项恰好只有一个非空才出现（见 lib/llm.js:17-30 的 && 语义）。
         pairIncomplete ? h('div', { className: 'ace-set-warn' }, t('warnPair')) : null,
-        h(FieldRow, { label: t('fieldMaxEntries'), desc: t('fieldMaxEntriesDesc'), control: h('input', numProps('maxEntries')) }),
+        h(FieldRow, { label: t('fieldMaxEntries'), desc: t('fieldMaxEntriesDesc'), control: h('input', numProps('maxEntries', 1, t('maxEntriesPlaceholder'))) }),
+        h(FieldRow, {
+          label: t('fieldAutoRecap'), desc: t('fieldAutoRecapDesc'),
+          control: h(Switch, {
+            checked: state.value.autoRecap !== false,
+            onChange: (next) => commit('autoRecap', next),
+            onText: t('on'), offText: t('off'),
+          }),
+        }),
+        h(FieldRow, {
+          label: t('fieldAutoRecapThreshold'), desc: t('fieldAutoRecapThresholdDesc'),
+          control: h('input', numProps('autoRecapThreshold', 0)),
+        }),
+        h(FieldRow, {
+          label: t('fieldAutoRecapCooldownTurns'), desc: t('fieldAutoRecapCooldownTurnsDesc'),
+          control: h('input', numProps('autoRecapCooldownTurns', 0)),
+        }),
+        h(FieldRow, {
+          label: t('fieldAutoReviewInbox'), desc: t('fieldAutoReviewInboxDesc'),
+          control: h(Switch, {
+            checked: state.value.autoReviewInbox === true,
+            onChange: (next) => commit('autoReviewInbox', next),
+            onText: t('on'), offText: t('off'),
+          }),
+        }),
+        // —— 待合并复审（独立区块；失败只降级成一行灰字）——
+        h('div', { className: 'ace-inbox' },
+          h('div', { className: 'ace-inbox-title' }, t('inboxTitle')),
+          inbox.status === 'failed'
+            ? h('div', { className: 'ace-inbox-empty' }, t('inboxUnavailable'))
+            : (inbox.full ? h('div', { className: 'ace-inbox-full' }, t('inboxFull')) : null),
+          inbox.status === 'ready' && !inbox.full && inbox.items.length === 0
+            ? h('div', { className: 'ace-inbox-empty' }, t('inboxEmpty'))
+            : null,
+          inbox.status === 'ready' && inbox.items.length > 0 ? h('ul', { className: 'ace-inbox-list' },
+            inbox.items.map((item, index) => h('li', { key: 'inbox:' + index + ':' + item.newEntryId, className: 'ace-inbox-item' },
+              h('div', { className: 'ace-inbox-pair' },
+                h('span', { className: 'ace-inbox-id' }, String(item.newEntryId ?? '')),
+                h('span', { className: 'ace-inbox-title2' }, ' 《' + String(item.newEntryTitle ?? '') + '》'),
+                h('span', { className: 'ace-inbox-arrow' }, '↔'),
+                h('span', { className: 'ace-inbox-id' }, String(item.bestMatchId ?? '')),
+                h('span', { className: 'ace-inbox-title2' }, ' 《' + String(item.bestMatchTitle ?? '') + '》')),
+              h('div', { className: 'ace-inbox-ratio' },
+                t('inboxRatio') + ' ' + Math.round(Number(item.ratio || 0) * 100) + '%'))))
+            : null,
+          inbox.status === 'ready' ? h('div', { className: 'ace-inbox-note' }, t('inboxHint')) : null),
         h('div', {
           className: status ? ('ace-set-status ace-set-status-' + (status.kind === 'ok' ? 'ok' : 'err')) : 'ace-set-status',
         }, status ? status.text : ''),

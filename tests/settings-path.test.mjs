@@ -111,7 +111,7 @@ test('migrateSettingsFile：新位置不存在时把旧内容原样复制过去�
   assert.equal(logs.length, 1);
   assert.match(logs[0], /dsh-ace/);
   assert.ok(logs[0].includes(path.resolve(to)), '日志要写明新位置');
-  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 test('migrateSettingsFile：新位置已存在时绝不覆盖', () => {
@@ -129,7 +129,7 @@ test('migrateSettingsFile：新位置已存在时绝不覆盖', () => {
   assert.equal(result.reason, 'target-exists');
   assert.deepEqual(JSON.parse(fs.readFileSync(to, 'utf8')), { maxEntries: 5 });
   assert.deepEqual(JSON.parse(fs.readFileSync(from, 'utf8')), { autoReflect: true });
-  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 test('migrateSettingsFile：旧文件不存在 / 两者同路径都跳过', () => {
@@ -143,7 +143,7 @@ test('migrateSettingsFile：旧文件不存在 / 两者同路径都跳过', () =
   fs.writeFileSync(from, '{"autoReflect":false}');
   assert.deepEqual(migrateSettingsFile({ from, to: from }), { migrated: false, reason: 'same-path' });
   assert.equal(fs.readFileSync(from, 'utf8'), '{"autoReflect":false}');
-  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 test('migrateSettingsFile：迁移后的文件权限为 0o600（与 writeStored 同口径）', { skip: process.platform === 'win32' }, () => {
@@ -154,5 +154,5 @@ test('migrateSettingsFile：迁移后的文件权限为 0o600（与 writeStored 
   fs.writeFileSync(from, '{"autoReflect":true}');
   migrateSettingsFile({ from, to });
   assert.equal(fs.statSync(to).mode & 0o777, 0o600);
-  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
