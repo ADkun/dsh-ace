@@ -21,11 +21,16 @@ dsh-ace 是 DSH 原生插件（cordis bundle），实现 ACE 方法：把操作�
 | `lib/index.js` | 插件入口：Config、三个工具注册、系统提示段 |
 | `client.js` | 浏览器半边：在 DSH 设置面板注册「ACE 手册」配置页（settings.section slot，经 ctx.configForms 读写配置；固定 VCP 暗色 + JetBrains Maple Mono） |
 | `lib/playbook.js` | 手册持久化：解析/序列化/增量操作/原子写/互斥锁（同进程 `withLock` + 跨进程 `withFileLock`，组合入口 `withExclusiveLock`；跨进程锁**不抢占活着的持锁者**，超时失败而非覆盖）；纯逻辑，可独立测试 |
+| `lib/merge.js` | 相似度层：合并建议（BM25 比率）与 **add 的冲突判定**（`detectAddConflicts`/`detectAllConflicts`）；依赖方向单向：playbook.js ← merge.js ← commit.js ← index.js |
+| `lib/commit.js` | 提交编排：锁内「读最新 → 逐条冲突判定 → 应用安全部分 → 原子写」（`commitOps`）；三条写入路径共用，也是并发用例跑的生产同款路径 |
+| `lib/trigger.js` | 自动复盘触发判定的纯函数：mutating 工具集合、主代理判定、触发条件判定，以及调度用的状态机（`recordTurnEnd`/`takePendingRecap`/`requeuePendingRecap`/`isBusyError`）；纯逻辑，可独立测试 |
+| `lib/recap.js` | 自动复盘调度器（`createRecapController`）：回合内只记账挂待办，`agent/status` 报 idle 的空闲边沿才真正执行；撞上宿主忙碌则放回队列重试（上限 3 次）；纯逻辑，可独立测试 |
 | `lib/prompts.js` | Reflector/Curator 提示词与 LLM JSON 提取 |
 | `lib/llm.js` | 模型路由解析与单次 LLM 调用 |
 | `lib/playbook-path.js` | 手册文件位置解析（绝对路径 / `~` 展开 / 相对工作目录 / 空串=本机共享层 `<DSH home>/ace/playbook.md`；纯逻辑，可独立测试） |
 | `lib/settings-path.js` | 设置文件位置解析（profileContext → DSH_PROFILE_DIR → DSH_HOME → ~/.dsh）与旧文件一次性迁移（纯逻辑，可独立测试） |
 | `tests/playbook.test.mjs` | 持久化层单元测试（node --test） |
+| `tests/concurrency.test.mjs` | 真实子进程并发用例（两个 node 子进程同时操作同一本手册，跑 lib/commit.js 的生产同款路径；脚本写在系统临时目录，用完即删） |
 | `tests/playbook-path.test.mjs` | 手册路径解析链的单元测试（node --test） |
 | `tests/settings-path.test.mjs` | 设置路径解析与迁移的单元测试（node --test） |
 

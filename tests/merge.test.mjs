@@ -72,3 +72,24 @@ test('computeMergeSuggestions: custom threshold', () => {
   const low = computeMergeSuggestions(existing, newEntries, { thresholdRatio: 0.01 });
   assert.ok(low.length >= high.length);
 });
+
+test('computeMergeSuggestions: ratio 是对称比率且不超过 1（不出现 >100% 的相似度）', () => {
+  const existing = [
+    makeEntry('ace-001', '配置里缺少超时时间', '配置服务调用时', '设置合理的超时时间'),
+    makeEntry('ace-002', '提交前先跑测试', '改完代码要提交', '先跑一遍测试再提交'),
+  ];
+  const newEntries = [
+    makeEntry('ace-003', '配置里缺少重试次数', '配置服务调用时', '设置合理的重试次数'),
+    makeEntry('ace-004', '提交前先跑测试', '提交代码之前', '运行 npm test 确认全部通过'),
+  ];
+  for (const s of computeMergeSuggestions(existing, newEntries)) {
+    assert.ok(s.ratio <= 1, '比率必须 ≤ 1，实际 ' + s.ratio);
+    assert.ok(s.ratio >= 0);
+  }
+});
+
+test('computeMergeSuggestions: 只比正文，标题相近但正文不同的两条经验不产生建议', () => {
+  const existing = [makeEntry('ace-001', '配置里缺少超时时间', '配置服务调用时', '设置合理的超时时间')];
+  const newEntries = [makeEntry('ace-002', '配置里缺少重试次数', '配置服务调用时', '设置合理的重试次数')];
+  assert.equal(computeMergeSuggestions(existing, newEntries).length, 0, '同领域不同经验不应被判为高度相似');
+});
