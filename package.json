@@ -1,6 +1,6 @@
 {
   "name": "dsh-ace",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "ACE（Agentic Context Engineering）原生 DSH 插件：把操作手册（playbook）当作可进化资产——ace_reflect 复盘任务轨迹提炼候选经验，ace_curate 以增量方式并入 Markdown 手册（增/改/删 + 去重），ace_playbook 供模型随时查阅。手册默认存本机共享层 <DSH home>/ace/playbook.md（跨工作区共用一本，填相对路径则改为该工作区私有），人可直接翻看编辑。不训练模型、不改权重，纯提示与文件。",
   "keywords": [
     "deepseek-harness",
@@ -32,6 +32,8 @@
     "AGENTS.md",
     "DESIGN.md",
     "TESTING.md",
+    "PAPER-ALIGNMENT.md",
+    "tools/*.mjs",
     "tests"
   ],
   "engines": {
@@ -64,7 +66,6 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0",
     "@deepseek-ai/dsh-llm": ">=0.2.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-timeout": ">=0.2.1-rc.2 <0.3.0",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependenciesMeta": {
@@ -72,9 +73,6 @@
       "optional": false
     },
     "@deepseek-ai/dsh-llm": {
-      "optional": false
-    },
-    "@deepseek-ai/dsh-timeout": {
       "optional": false
     },
     "@deepseek-ai/schemastery": {
