@@ -56,7 +56,13 @@ window.__ModuleLoader__.load({
       catalogFailed: '模型目录读取失败：宿主可能还没重启（其余字段照常可用）',
       warnPair: '只有 provider 与 model 两项都填才生效；只填一项会静默回落到会话模型。',
       fieldMaxEntries: '手册容量上限',
-      fieldMaxEntriesDesc: '超出后 ace_curate 整批拒绝，并提示先合并旧条目（默认 {d}，可填 {min}–{max}）',
+      fieldMaxEntriesDesc: '满额后先由 LLM 把相近的两条合并成一条，仍超则按命中次数从少到多淘汰（搬进同目录的 archive.md，永不物理删除）（默认 {d}，可填 {min}–{max}）',
+      fieldEvictProtectDays: '新条目保护天数',
+      fieldEvictProtectDaysDesc: '刚写进手册的条目在这几天内不参与淘汰（按元数据的 created 到今天的间隔算）；这一段里仍然只先淘汰老条目，配额需要时才会动它们。调大 = 新条目活得更久、老条目更早被淘汰；填 0 = 不保护（与旧行为一致）（默认 {d}，可填 {min}–{max}）',
+      fieldInjectTokenBudget: '注入 token 预算',
+      fieldInjectTokenBudgetDesc: '每回合自动注入块的 token 估算上限（ASCII ×0.4 + 汉字 ×1.0 粗略折算）。调小 = 注入更少内容、更省 token 与上下文（超预算的条目直接不注入）；调大 = 多注几条。默认 {d}，可填 {min}–{max}',
+      fieldInjectMaxEntries: '一次注入最多几条',
+      fieldInjectMaxEntriesDesc: '每回合自动注入最多塞进几条经验。调小 = 更少注入更省 token（默认 5 条之外的候选当场丢弃，不占任何名额）；调大 = 一次看到更多经验。默认 {d}，可填 {min}–{max}',
       fieldAutoRecap: '自动归档经验',
       fieldAutoRecapDesc: '回合真正结束时由插件后台复盘并写入手册，不依赖模型主动调用',
       fieldAutoRecapThreshold: '自动归档触发门槛',
@@ -93,6 +99,25 @@ window.__ModuleLoader__.load({
       statsReasonMissing: '手册文件还不存在，暂无可统计内容',
       statsReasonUnreadable: '手册文件读取失败，暂无法统计',
       statsReasonNoEntries: '手册里还没有条目',
+      // —— ACE 运行统计（GET /stats 的 runtime 块：本进程内存态，宿主重启即归零）——
+      runtimeTitle: 'ACE 运行统计',
+      // 第 33 轮：计分整层删除后，六个数字换成「注入批次 / 注入追加 / 检索命中 / 淘汰数 / 合并数 / 归档数」。
+      runtimeInjectBatches: '注入批次',
+      runtimeInjectAppended: '注入追加',
+      runtimeRetrievalHits: '检索命中',
+      runtimeEvicted: '淘汰数',
+      runtimeMerged: '合并数',
+      runtimeArchived: '归档数',
+      runtimeArchivedByReason: '归档原因：被取代 {superseded} · 显式移除 {removed} · 最少使用淘汰 {evicted} · 合并 {merged}',
+      // 第 34 轮：跳过 / 失败两个数从设置页**删掉**，不是漏写。它们只存在于
+      // lib/index.js 的进程内计数器（skipped += 1 / failed += 1，继续进日志），
+      // 但 runtime（GET /stats）按红线只暴露精确七键，两个键根本不在协议里 ——
+      // 以前这两格读 undefined 后被 num() 兜成 0，等于天天给用户看假 0。
+      runtimeInjectDetail: '注入：批次 {batches} · 追加 {appended}',
+      runtimeInjectHint: '批次 = 每收到一条新消息挑一次经验；追加 = 这批经验真进了历史一次（同一批不重复，所以追加不会超过批次）。检索命中 = 用 ace_playbook 带 query 或 id 定向查找时被查出来的条目数（整本读取不计数）。',
+      runtimeEvictHint: '淘汰 = 手册满额、合并之后仍超限时，按命中次数从少到多搬进归档文件的条数（命中次数相同时创建更早的先走，再并列按编号）。合并 = 满额时由 LLM 把两条相近经验合成一条的条数（保留创建更早那条的编号）。',
+      runtimeHint: '这些数来自本次会话的内存状态，宿主重启即归零，不落盘。',
+      runtimeUnavailable: '宿主还没重启，本次统计里没有运行计数（重启后出现）。',
       // —— 三页导航（统计 / 设置 / 记录）——
       tabStats: '统计',
       tabSettings: '设置',
@@ -124,6 +149,18 @@ window.__ModuleLoader__.load({
       entriesPage: '第 {x} / {y} 页',
       entriesPrev: '上一页',
       entriesNext: '下一页',
+      // —— 记录页「已归档」分区（只读，永不物理删除）——
+      entriesScopeActive: '活跃',
+      entriesScopeArchived: '已归档',
+      entriesArchivedEmpty: '还没有归档条目',
+      entriesArchivedCount: '已归档 {n} 条（只读，永不物理删除）',
+      entriesArchiveReason: '归档原因',
+      entriesArchiveDate: '归档日期',
+      entriesArchiveSupersededBy: '被哪条取代',
+      entriesArchiveReasonSuperseded: '被新条目取代',
+      entriesArchiveReasonRemoved: '被显式移除',
+      entriesArchiveReasonEvicted: '最少使用淘汰',
+      entriesArchiveReasonMerged: '合并进另一条',
       on: '开',
       off: '关',
       saved: '已保存',
@@ -162,7 +199,13 @@ window.__ModuleLoader__.load({
       catalogFailed: 'Could not load the model catalog: the host may not have restarted yet (other fields still work)',
       warnPair: 'The override only applies when both provider and model are set; with just one set it silently falls back to the session model.',
       fieldMaxEntries: 'Playbook capacity',
-      fieldMaxEntriesDesc: 'ace_curate rejects whole batches beyond this and asks to merge old entries first (default {d}, {min}–{max})',
+      fieldMaxEntriesDesc: 'Once full, the plugin first asks the LLM to merge two similar entries into one; if still over the cap it evicts the least-hit entries (moved to archive.md beside the playbook, never deleted) (default {d}, {min}–{max})',
+      fieldEvictProtectDays: 'New-entry protection days',
+      fieldEvictProtectDaysDesc: 'Entries written into the playbook within the last N days are kept out of eviction first (N is measured from their created stamp to today); older entries are still evicted first, and protected ones are only touched when the quota cannot be met otherwise. Larger = new entries live longer and old ones go earlier; 0 = no protection (same as before) (default {d}, {min}–{max})',
+      fieldInjectTokenBudget: 'Injection token budget',
+      fieldInjectTokenBudgetDesc: 'Token estimate cap for the per-turn injected block (ASCII ×0.4 + CJK ×1.0). Smaller = inject less content and spend fewer tokens and less context (entries over budget are simply not injected); larger = inject more. Default {d}, {min}–{max}',
+      fieldInjectMaxEntries: 'Max entries per injection',
+      fieldInjectMaxEntriesDesc: 'How many experience entries at most are injected per turn. Smaller = less injected, fewer tokens (candidates beyond the cap are dropped for that turn and take up no quota); larger = see more experience at once. Default {d}, {min}–{max}',
       fieldAutoRecap: 'Archive experience automatically',
       fieldAutoRecapDesc: 'Reflect and write into the playbook in the background once a turn truly ends, without relying on the model calling it',
       fieldAutoRecapThreshold: 'Auto-archive trigger threshold',
@@ -198,6 +241,24 @@ window.__ModuleLoader__.load({
       statsReasonMissing: 'The playbook file does not exist yet: nothing to count',
       statsReasonUnreadable: 'The playbook file could not be read: stats unavailable',
       statsReasonNoEntries: 'The playbook has no entries yet',
+      // —— ACE runtime counters (the runtime block of GET /stats: in-process, reset on host restart) ——
+      runtimeTitle: 'ACE runtime',
+      runtimeInjectBatches: 'Injection batches',
+      runtimeInjectAppended: 'Appended to history',
+      runtimeRetrievalHits: 'Retrieval hits',
+      runtimeEvicted: 'Evicted',
+      runtimeMerged: 'Merged',
+      runtimeArchived: 'Archived',
+      runtimeArchivedByReason: 'Archive reasons: superseded {superseded} · removed {removed} · least-used eviction {evicted} · merged {merged}',
+      // Round 34: skipped/failed were dropped from the panel on purpose -- the counters still
+      // exist in the process (lib/index.js) and still go to the log, but the runtime payload
+      // exposes exactly seven keys and neither of them is one, so the old cells rendered a
+      // hardcoded 0 forever.
+      runtimeInjectDetail: 'Injections: batches {batches} · appended {appended}',
+      runtimeInjectHint: 'A batch is picked once per incoming user message; appended counts the batches that actually entered the history (never twice for the same batch, so appended <= batches). Retrieval hits count the entries returned by a targeted ace_playbook lookup (with a query or an id); reading the whole playbook is not counted.',
+      runtimeEvictHint: 'Evicted = entries moved to the archive file because the playbook was full even after merging, picked by fewest hits first (ties go to the older created stamp, then to the lower id). Merged = pairs the LLM folded into one entry while the playbook was full (the older entry keeps its id).',
+      runtimeHint: 'These counters live in this process only: they reset when the host restarts and are never written to disk.',
+      runtimeUnavailable: 'The host has not been restarted yet, so this payload carries no runtime counters.',
       // —— Three tabs (stats / settings / entries) ——
       tabStats: 'Stats',
       tabSettings: 'Settings',
@@ -227,6 +288,18 @@ window.__ModuleLoader__.load({
       entriesPage: 'Page {x} / {y}',
       entriesPrev: 'Previous',
       entriesNext: 'Next',
+      // —— Entries page "archived" scope (read-only, never physically deleted) ——
+      entriesScopeActive: 'Active',
+      entriesScopeArchived: 'Archived',
+      entriesArchivedEmpty: 'Nothing has been archived yet',
+      entriesArchivedCount: '{n} archived (read-only, never physically deleted)',
+      entriesArchiveReason: 'Archive reason',
+      entriesArchiveDate: 'Archived on',
+      entriesArchiveSupersededBy: 'Superseded by',
+      entriesArchiveReasonSuperseded: 'Superseded by a newer entry',
+      entriesArchiveReasonRemoved: 'Removed on request',
+      entriesArchiveReasonEvicted: 'Evicted as least used',
+      entriesArchiveReasonMerged: 'Merged into another entry',
       on: 'On',
       off: 'Off',
       saved: 'Saved',
@@ -372,6 +445,38 @@ window.__ModuleLoader__.load({
       '.ace-entries-pager-btn.is-active{color:#2dd4bf;border-color:#1d3a38}',
       '.ace-entries-pager-text{font-size:10px;color:#7d8fa1}',
       '.ace-entries-note{font-size:11px;color:#7d8fa1;line-height:1.6;padding:2px 0 4px}',
+      // —— ACE 运行统计块（GET /stats 的 runtime 部分）——
+      // 刻意不复用 .ace-stats-grid / .ace-stats-note / .ace-stats-cell：
+      // 那几个类被既有测试按「统计块内恰好 N 个」精确计数，新块另起一套类名互不干扰。
+      '.ace-runtime{padding:2px 0 8px;border-top:1px solid #1a2430;margin-top:4px}',
+      '.ace-runtime-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:10px 0 2px}',
+      '.ace-runtime-title{font-size:13px;font-weight:600;color:#eaf2fb}',
+      '.ace-runtime-grid{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}',
+      '.ace-runtime-cell{background:#131a22;border:1px solid #263140;border-radius:8px;padding:6px 10px;min-width:104px}',
+      '.ace-runtime-k{font-size:10px;color:#7d8fa1;letter-spacing:.04em}',
+      '.ace-runtime-v{font-size:13px;color:#eaf2fb;padding-top:2px}',
+      '.ace-runtime-acc{color:#2dd4bf}',
+      '.ace-runtime-sub{font-size:11px;color:#8fa1b3;margin:8px 0 2px;letter-spacing:.04em}',
+      '.ace-runtime-line{font-size:11px;color:#9fb2c5;line-height:1.6;padding:0 0 2px}',
+      '.ace-runtime-body{padding:0}',
+      '.ace-runtime-hint{font-size:10px;color:#7d8fa1;line-height:1.6;padding:2px 0 4px}',
+      // —— 记录页「已归档」分区（只读）——
+      '.ace-archived{padding:2px 0 8px}',
+      '.ace-archived-count{font-size:10px;color:#7d8fa1;padding:0 0 6px}',
+      '.ace-archived-list{margin:0;padding:0;list-style:none}',
+      '.ace-archived-item{border-bottom:1px solid #131a22}',
+      '.ace-archived-row{display:flex;align-items:center;gap:8px;font-size:11px;color:#dce6f1;padding:4px 0;cursor:pointer}',
+      '.ace-archived-row:hover{background:#131a22}',
+      '.ace-archived-id{flex:0 0 64px;color:#5eead4}',
+      '.ace-archived-title{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#eaf2fb}',
+      '.ace-archived-date{flex:0 0 84px;color:#7d8fa1;font-size:10px}',
+      '.ace-archived-reason{flex:0 0 auto;font-size:10px;color:#c7a86b;border:1px solid #3a3320;border-radius:4px;padding:1px 6px}',
+      '.ace-archived-detail{padding:2px 0 8px 72px;font-size:11px;color:#9fb2c5;line-height:1.6}',
+      '.ace-archived-note{font-size:11px;color:#7d8fa1;line-height:1.6;padding:2px 0 4px}',
+      '.ace-entries-scope{display:flex;gap:4px;margin:0 0 6px}',
+      '.ace-entries-scope-btn{font-size:11px;color:#9fb2c5;background:#131a22;border:1px solid #263140;border-radius:6px;padding:3px 9px;cursor:pointer;font-family:inherit}',
+      '.ace-entries-scope-btn:hover{color:#2dd4bf;border-color:#1d3a38}',
+      '.ace-entries-scope-btn.is-active{color:#2dd4bf;border-color:#1d3a38}',
     ].join('\n');
 
     /**
@@ -613,6 +718,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 界面日期**只到日**：把毫秒时间戳（`2026-10-25T06:12:33.412+08:00`）截成 `YYYY-MM-DD`。
+     *
+     * 为什么必须有这一步：手册元数据的时间戳是毫秒精度本地 ISO（`lib/timestamp.js` 的 `nowStamp`，
+     * 29 字符），而这一列只有 84px 宽（`.ace-entries-row-date`），直接渲染会把整行挤爆。
+     * 兼容旧格式（只有 `2026-10-25`，原样返回）与空值 → '—'；认证不出的垃圾值同样 → '—'（绝不渲染出 undefined）。
+     *
+     * 位置要求：**两条渲染路径都必须走这里**（记录页行日期 / 统计页最近更新列表），
+     * 不许再在别处写 `String(x.updated)`——tests/archive.test.mjs 与 client 渲染用例守着。
+     */
+    function displayDay(value) {
+      const text = String(value ?? '').trim();
+      const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+      return m ? m[1] + '-' + m[2] + '-' + m[3] : '—';
+    }
+
+    /**
      * 极简模板替换：把文案里的 {key} 换成 vars[key]。
      * 字典里带数字的文案（「最近 {n} 天更新」「共 {n} 条 / 上限 {m} 条」）用占位符，
      * 免得同一句话在 zh/en 里各写死一个数字。缺值保留占位符，绝不渲染出 "undefined"。
@@ -698,8 +819,73 @@ window.__ModuleLoader__.load({
             recent.map((item) => h('li', { className: 'ace-stats-recent-item', key: String(item?.id ?? '') },
               h('span', { className: 'ace-stats-id' }, String(item?.id ?? '')),
               h('span', { className: 'ace-stats-recent-title' }, String(item?.title ?? '')),
-              h('span', { className: 'ace-stats-recent-date' }, String(item?.updated ?? ''))))),
+              h('span', { className: 'ace-stats-recent-date' }, displayDay(item?.updated))))),
         data.generatedAt ? h('div', { className: 'ace-stats-note' }, t('statsGeneratedAt') + ' ' + String(data.generatedAt)) : null);
+    }
+
+    // —— ACE 运行统计（GET /stats 的 runtime 块）——
+    // 这些数全部来自宿主进程内存（lib/index.js 的 recapStats / archiveStats / injectionStats），
+    // 宿主重启即归零、刻意不落盘，所以这里没有第二个接口，只消费 /stats 同一个 payload。
+    // 类名一律 ace-runtime-*：.ace-stats-grid / .ace-stats-note / .ace-stats-cell 被既有测试
+    // 按「统计块内恰好 N 个」精确计数，新块另起一套类名，互不干扰。
+    function RuntimeBlock(props) {
+      const { t, stats } = props;
+      const data = stats && typeof stats.data === 'object' && stats.data !== null ? stats.data : null;
+      const runtime = data && typeof data.runtime === 'object' && data.runtime !== null ? data.runtime : null;
+
+      const head = h('div', { className: 'ace-runtime-head' },
+        h('div', { className: 'ace-runtime-title' }, t('runtimeTitle')));
+
+      // 宿主还没重启（旧版 /stats 没有 runtime 字段）时只留一行灰字：
+      // 这一块绝不抛错，也不影响上面的手册统计块。
+      if (!runtime) {
+        return h('div', { className: 'ace-runtime' }, head,
+          h('div', { className: 'ace-runtime-hint' }, t('runtimeUnavailable')));
+      }
+
+      const num = (value) => {
+        const n = Number(value);
+        return Number.isFinite(n) && n > 0 ? String(Math.floor(n)) : '0';
+      };
+      const byReason = runtime.archivedByReason && typeof runtime.archivedByReason === 'object'
+        ? runtime.archivedByReason
+        : {};
+
+      const cell = (key, text, accent) => h('div', { className: 'ace-runtime-cell' },
+        h('div', { className: 'ace-runtime-k' }, t(key)),
+        h('div', { className: accent ? 'ace-runtime-v ace-runtime-acc' : 'ace-runtime-v' }, text));
+
+      // 第 33 轮：计分整层删除后只剩六个数字（注入批次 / 注入追加 / 检索命中 / 淘汰数 /
+      // 合并数 / 归档数）。设置页不出现任何评分或考察位的内部字段名。
+      return h('div', { className: 'ace-runtime' },
+        head,
+        h('div', { className: 'ace-runtime-body' },
+          h('div', { className: 'ace-runtime-grid' },
+            // 注入口径：批次与追加是两个数，见字典 runtimeInjectHint 的一句话解释。
+            cell('runtimeInjectBatches', num(runtime.injectedBatches), true),
+            cell('runtimeInjectAppended', num(runtime.injectedAppended)),
+            cell('runtimeRetrievalHits', num(runtime.retrievalHits)),
+            cell('runtimeEvicted', num(runtime.evicted)),
+            cell('runtimeMerged', num(runtime.merged)),
+            cell('runtimeArchived', num(runtime.archived))),
+          h('div', { className: 'ace-runtime-sub' }, t('runtimeArchived')),
+          h('div', { className: 'ace-runtime-line' }, fmt(t('runtimeArchivedByReason'), {
+            superseded: num(byReason.superseded),
+            removed: num(byReason['removed-by-request']),
+            evicted: num(byReason.evicted),
+            merged: num(byReason.merged),
+          })),
+          h('div', { className: 'ace-runtime-sub' }, t('runtimeInjectBatches')),
+          // 只渲染协议里真有的两个数。跳过 / 失败**不许加回来**：runtime 是精确七键
+          // （injectedBatches / injectedAppended / retrievalHits / evicted / merged /
+          // archived / archivedByReason），两个键不在里面，加回来就是恒显示 0 的假数字。
+          h('div', { className: 'ace-runtime-line' }, fmt(t('runtimeInjectDetail'), {
+            batches: num(runtime.injectedBatches),
+            appended: num(runtime.injectedAppended),
+          })),
+          h('div', { className: 'ace-runtime-line ace-runtime-note' }, t('runtimeInjectHint')),
+          h('div', { className: 'ace-runtime-line ace-runtime-note' }, t('runtimeEvictHint')),
+          h('div', { className: 'ace-runtime-hint' }, t('runtimeHint'))));
     }
 
     // 服务端 /entries 降级 reason → 字典键。missing（手册文件还不存在）与 needs-session
@@ -714,6 +900,21 @@ window.__ModuleLoader__.load({
     function entriesReasonText(t, reason) {
       const key = ENTRIES_REASON_KEYS[String(reason ?? '')];
       return t(key ?? 'entriesReasonUnreadable');
+    }
+
+    // 归档原因（superseded / removed-by-request / evicted / merged，
+    // 与宿主 lib/entry-format.js 的 ARCHIVE_REASONS 一一对齐）→ 字典键。
+    // 未知原因直接回显原字符串，不吞掉信息。
+    const ENTRIES_ARCHIVE_REASON_KEYS = {
+      superseded: 'entriesArchiveReasonSuperseded',
+      'removed-by-request': 'entriesArchiveReasonRemoved',
+      evicted: 'entriesArchiveReasonEvicted',
+      merged: 'entriesArchiveReasonMerged',
+    };
+
+    function archiveReasonText(t, reason) {
+      const key = ENTRIES_ARCHIVE_REASON_KEYS[String(reason ?? '')];
+      return key ? t(key) : String(reason ?? '');
     }
 
     // —— 记录页（GET /entries，只读）——
@@ -775,7 +976,11 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState('idle');
       // 降级 reason（missing / needs-session / unreadable）：三分派渲染不同文案，绝不合并。
       const [reason, setReason] = React.useState(null);
-      const [data, setData] = React.useState({ entries: [], total: 0, maxEntries: null });
+      const [data, setData] = React.useState({ entries: [], archived: [], total: 0, archivedTotal: 0, maxEntries: null });
+      // 分区：'active'（活跃条目，可搜索/排序/分页）| 'archived'（归档区，只读）。
+      // 归档条目永不物理删除，因此这里只有「看」，没有任何删除/还原入口。
+      const [scope, setScope] = React.useState('active');
+      const [archivedOpen, setArchivedOpen] = React.useState({});
       const [query, setQuery] = React.useState('');
       const [sortKey, setSortKey] = React.useState('updated');
       const [sortDir, setSortDir] = React.useState('desc');
@@ -803,9 +1008,16 @@ window.__ModuleLoader__.load({
               setStatus('failed');
               return;
             }
+            // archived / archivedTotal 是阶段 2 起 /entries 就带的字段；旧宿主没有这两个字段时
+            // 按空数组处理，活跃分区照常可用（缺失不等于故障）。
+            const archived = Array.isArray(payload.archived) ? payload.archived : [];
             setData({
               entries: payload.entries,
+              archived,
               total: Number.isFinite(Number(payload.total)) ? Number(payload.total) : payload.entries.length,
+              archivedTotal: Number.isFinite(Number(payload.archivedTotal))
+                ? Number(payload.archivedTotal)
+                : archived.length,
               maxEntries: typeof payload.maxEntries === 'number' ? payload.maxEntries : null,
             });
             setReason(payload.reason ? String(payload.reason) : null);
@@ -842,10 +1054,19 @@ window.__ModuleLoader__.load({
       }
 
       const all = Array.isArray(data.entries) ? data.entries : [];
-      if (all.length === 0) {
-        return h('div', { className: 'ace-entries' }, head,
-          h('div', { className: 'ace-entries-note' }, t('entriesEmpty')));
-      }
+      const archivedAll = Array.isArray(data.archived) ? data.archived : [];
+
+      // 活跃 / 已归档 切换。归档区只读：没有删除、没有还原、没有编辑入口 ——
+      // 归档条目按设计永不物理删除（见 AGENTS.md 红线），界面上也就不能出现这类按钮。
+      const scopeButton = (id, label) => h('button', {
+        type: 'button',
+        className: 'ace-entries-scope-btn' + (scope === id ? ' is-active' : ''),
+        'aria-pressed': scope === id ? 'true' : 'false',
+        onClick: () => setScope(id),
+      }, label);
+      const scopeSwitch = h('div', { className: 'ace-entries-scope', role: 'group', 'aria-label': t('entriesTitle') },
+        scopeButton('active', t('entriesScopeActive')),
+        scopeButton('archived', t('entriesScopeArchived')));
 
       const needle = query.trim().toLowerCase();
       const filtered = all.filter((entry) => entryMatches(entry, needle));
@@ -887,6 +1108,73 @@ window.__ModuleLoader__.load({
 
       const toggleRow = (id) => setOpen((prev) => ({ ...prev, [id]: !prev[id] }));
 
+      // —— 已归档分区（只读展示）——
+      // 行/详情一律用 ace-archived-* 类名：.ace-entries-row / .ace-entries-detail 被既有测试
+      // 按「活跃分区里有几条」精确计数，归档行不能混进同一个类名。
+      const archivedDetailBlock = (labelKey, value, emptyKey) => {
+        const text = String(value ?? '');
+        if (text.trim() === '') {
+          return emptyKey
+            ? h('div', { className: 'ace-archived-detail-block' },
+              h('div', { className: 'ace-archived-detail-k' }, t(labelKey)),
+              h('div', { className: 'ace-entries-detail-empty' }, t(emptyKey)))
+            : null;
+        }
+        return h('div', { className: 'ace-archived-detail-block' },
+          h('div', { className: 'ace-archived-detail-k' }, t(labelKey)),
+          h('div', { className: 'ace-archived-detail-v' }, text));
+      };
+
+      const archivedView = () => {
+        const archivedList = archivedAll.length === 0
+          ? h('div', { className: 'ace-archived-note' }, t('entriesArchivedEmpty'))
+          : h('ul', { className: 'ace-archived-list' },
+            archivedAll.map((entry) => {
+              const id = String(entry?.id ?? '');
+              const isOpen = archivedOpen[id] === true;
+              const archive = entry?.archive && typeof entry.archive === 'object' ? entry.archive : {};
+              const toggleArchived = () => setArchivedOpen((prev) => ({ ...prev, [id]: !prev[id] }));
+              return h('li', { key: 'archived:' + id, className: 'ace-archived-item' },
+                h('div', {
+                  className: 'ace-archived-row',
+                  role: 'button',
+                  tabIndex: 0,
+                  'aria-expanded': isOpen ? 'true' : 'false',
+                  onClick: toggleArchived,
+                  onKeyDown: (e) => {
+                    if (e?.key !== 'Enter' && e?.key !== ' ') return;
+                    if (typeof e.preventDefault === 'function') e.preventDefault();
+                    toggleArchived();
+                  },
+                },
+                  h('span', { className: 'ace-archived-id' }, id),
+                  h('span', { className: 'ace-archived-title' }, String(entry?.title ?? '')),
+                  h('span', { className: 'ace-archived-date' }, displayDay(archive.date)),
+                  h('span', { className: 'ace-archived-reason' }, archiveReasonText(t, archive.reason))),
+                isOpen
+                  ? h('div', { className: 'ace-archived-detail' },
+                    archivedDetailBlock('entriesArchiveReason', archiveReasonText(t, archive.reason), null),
+                    archivedDetailBlock('entriesArchiveDate', archive.date, null),
+                    archivedDetailBlock('entriesArchiveSupersededBy', archive.supersededBy, null),
+                    archivedDetailBlock('entriesCondition', entry?.condition, null),
+                    archivedDetailBlock('entriesAction', entry?.action, null),
+                    archivedDetailBlock('entriesRationale', entry?.rationale, 'entriesRationaleEmpty'))
+                  : null);
+            }));
+        return h('div', { className: 'ace-entries' }, head, scopeSwitch,
+          h('div', { className: 'ace-archived' },
+            h('div', { className: 'ace-archived-count' },
+              fmt(t('entriesArchivedCount'), { n: data.archivedTotal })),
+            archivedList));
+      };
+
+      if (scope === 'archived') return archivedView();
+
+      if (all.length === 0) {
+        return h('div', { className: 'ace-entries' }, head, scopeSwitch,
+          h('div', { className: 'ace-entries-note' }, t('entriesEmpty')));
+      }
+
       const list = h('ul', { className: 'ace-entries-list' },
         rows.map((entry) => {
           const id = String(entry?.id ?? '');
@@ -906,7 +1194,7 @@ window.__ModuleLoader__.load({
             },
               h('span', { className: 'ace-entries-row-id' }, id),
               h('span', { className: 'ace-entries-row-title' }, String(entry?.title ?? '')),
-              h('span', { className: 'ace-entries-row-date' }, String(entry?.updated ?? '') || '—'),
+              h('span', { className: 'ace-entries-row-date' }, displayDay(entry?.updated)),
               h('span', {
                 className: 'ace-entries-row-source' + (entry?.auto === true ? ' is-auto' : ''),
               }, entry?.auto === true ? t('entriesAuto') : t('entriesManual'))),
@@ -947,6 +1235,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'ace-entries' },
         head,
+        scopeSwitch,
         h('input', {
           className: 'ace-entries-search',
           type: 'text',
@@ -1180,6 +1469,13 @@ window.__ModuleLoader__.load({
       const maxEntriesDefault = boundsDefault('maxEntries', 100);
       const thresholdRange = boundsOf('autoRecapThreshold', [0, 1000]);
       const cooldownRange = boundsOf('autoRecapCooldownTurns', [0, 1000]);
+      // 第 36 轮三个预算项：边界与默认值同样只从 describe() 来，客户端不再写死数字。
+      const protectDaysRange = boundsOf('evictProtectDays', [0, 365]);
+      const protectDaysDefault = boundsDefault('evictProtectDays', 14);
+      const injectBudgetRange = boundsOf('injectTokenBudget', [100, 8000]);
+      const injectBudgetDefault = boundsDefault('injectTokenBudget', 900);
+      const injectCountRange = boundsOf('injectMaxEntries', [1, 20]);
+      const injectCountDefault = boundsDefault('injectMaxEntries', 5);
 
       const numProps = (field, min = 1, ph, max) => ({
         className: 'ace-set-input',
@@ -1300,7 +1596,11 @@ window.__ModuleLoader__.load({
           id: 'ace-page-stats',
           'aria-labelledby': 'ace-tab-stats',
           hidden: tabId !== 'stats',
-        }, h(StatsBlock, { t, stats, onRefresh: reloadStats })),
+        },
+          h(StatsBlock, { t, stats, onRefresh: reloadStats }),
+          // 运行统计单独一块（同一个 /stats payload 的 runtime 字段），
+          // 刷新按钮与手册统计共用上面那个。
+          h(RuntimeBlock, { t, stats })),
         h('div', {
           className: 'ace-page',
           role: 'tabpanel',
@@ -1369,6 +1669,25 @@ window.__ModuleLoader__.load({
             controlId: 'ace-field-maxEntries',
             // placeholder 也是同一份默认值（不再写死 '100'）：宿主改了 DEFAULT_MAX_ENTRIES，这里跟着变。
             control: h('input', { ...numProps('maxEntries', maxEntriesRange[0], String(maxEntriesDefault), maxEntriesRange[1]), id: 'ace-field-maxEntries' }),
+          }),
+          // 第 36 轮三个预算项：都是 number 输入，写入路径与其它字段完全一致。
+          h(FieldRow, {
+            label: t('fieldEvictProtectDays'),
+            desc: fmt(t('fieldEvictProtectDaysDesc'), { min: protectDaysRange[0], max: protectDaysRange[1], d: protectDaysDefault }),
+            controlId: 'ace-field-evictProtectDays',
+            control: h('input', { ...numProps('evictProtectDays', protectDaysRange[0], String(protectDaysDefault), protectDaysRange[1]), id: 'ace-field-evictProtectDays' }),
+          }),
+          h(FieldRow, {
+            label: t('fieldInjectTokenBudget'),
+            desc: fmt(t('fieldInjectTokenBudgetDesc'), { min: injectBudgetRange[0], max: injectBudgetRange[1], d: injectBudgetDefault }),
+            controlId: 'ace-field-injectTokenBudget',
+            control: h('input', { ...numProps('injectTokenBudget', injectBudgetRange[0], String(injectBudgetDefault), injectBudgetRange[1]), id: 'ace-field-injectTokenBudget' }),
+          }),
+          h(FieldRow, {
+            label: t('fieldInjectMaxEntries'),
+            desc: fmt(t('fieldInjectMaxEntriesDesc'), { min: injectCountRange[0], max: injectCountRange[1], d: injectCountDefault }),
+            controlId: 'ace-field-injectMaxEntries',
+            control: h('input', { ...numProps('injectMaxEntries', injectCountRange[0], String(injectCountDefault), injectCountRange[1]), id: 'ace-field-injectMaxEntries' }),
           }),
           h(FieldRow, {
             label: t('fieldAutoRecap'), desc: t('fieldAutoRecapDesc'), controlId: 'ace-field-autoRecap',

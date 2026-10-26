@@ -240,3 +240,49 @@ test('统计⑤b：emptyStats 与 summarizePlaybook 的字段集合一致（客�
   assert.equal(empty.ok, true);
   assert.equal(empty.reason, STATS_REASONS.missing);
 });
+
+// —— ⑥ 运行统计的归一化（第 33 轮：正负评分删除后只剩六个数字）——
+
+test('统计⑥：runtime 七键原样透传 —— 注入批次 / 注入追加 / 检索命中 / 淘汰 / 合并 / 归档 + 四原因分列', () => {
+  const runtime = {
+    injectedBatches: 9,
+    injectedAppended: 7,
+    retrievalHits: 11,
+    evicted: 4,
+    merged: 3,
+    archived: 10,
+    archivedByReason: { superseded: 1, 'removed-by-request': 2, evicted: 4, merged: 3 },
+  };
+  const stats = summarizePlaybook(SAMPLE, { now: NOW, maxEntries: 100, runtime });
+  // 关键：非 0 值必须**原样透传**。缺字段时 count() 补 0 会把「映射写错」伪装成「本来就是 0」，
+  // 所以这里的夹具必须带非 0 值 —— 否则 stats.js 的取值映射没有任何用例钉得住。
+  assert.equal(stats.runtime.injectedBatches, 9, '注入批次原样透传（不是恒 0）');
+  assert.equal(stats.runtime.injectedAppended, 7, '注入追加原样透传，且与批次是两个数');
+  assert.equal(stats.runtime.retrievalHits, 11, '检索命中原样透传（整本读取不计数的那个数）');
+  assert.equal(stats.runtime.evicted, 4, '淘汰数原样透传（不是恒 0）');
+  assert.equal(stats.runtime.merged, 3, '合并数原样透传（不是恒 0）');
+  assert.equal(stats.runtime.archived, 10, '归档总数原样透传');
+  assert.deepEqual(stats.runtime.archivedByReason, {
+    superseded: 1, 'removed-by-request': 2, evicted: 4, merged: 3,
+  }, '归档按四种结构性原因分列，一个都不能少');
+  // 旧口径整层删除：不许以任何形式残留（否则设置页会显示一个永远为 0 的死格子）。
+  for (const gone of ['recaps', 'candidates', 'written', 'helpful', 'harmful', 'unobserved', 'gateRejected',
+    'injectedSkipped', 'injectedFailed', 'injectedProbation', 'injected']) {
+    assert.equal(gone in stats.runtime, false, 'runtime 里不许再有旧字段 ' + gone);
+  }
+  assert.deepEqual(
+    Object.keys(stats.runtime).sort(),
+    ['archived', 'archivedByReason', 'evicted', 'injectedAppended', 'injectedBatches', 'merged', 'retrievalHits'],
+    'runtime 恒 7 个键（与 GET /api/dsh-ace/stats 的契约一致）',
+  );
+  // 缺字段 / 畸形值一律补 0，字段本身恒在（客户端不必特判）。
+  const empty = summarizePlaybook(SAMPLE, { now: NOW, maxEntries: 100, runtime: { injectedBatches: 'x', injectedAppended: -3 } });
+  assert.equal(empty.runtime.injectedBatches, 0, '非数值按 0 处理');
+  assert.equal(empty.runtime.injectedAppended, 0, '负数按 0 处理');
+  assert.equal(empty.runtime.retrievalHits, 0, '检索命中缺字段补 0');
+  assert.equal(empty.runtime.evicted, 0, '淘汰数缺字段补 0');
+  assert.equal(empty.runtime.merged, 0, '合并数缺字段补 0');
+  assert.deepEqual(empty.runtime.archivedByReason, {
+    superseded: 0, 'removed-by-request': 0, evicted: 0, merged: 0,
+  }, '归档原因分列缺字段时四键齐全、全 0');
+});

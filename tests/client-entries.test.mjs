@@ -513,7 +513,8 @@ test('记录页：行 = 编号 · 标题 · 更新日期 · 来源标签；点�
   const host = makeHost({
     entries: entriesPayload([
       // 默认按更新日期倒序：ace-001 在前，所以 rows()[0] 是它。
-      entry({ id: 'ace-001', title: '自动那条', auto: true, updated: '2026-09-21', condition: '条件A', action: '做法A', rationale: '依据A' }),
+      // 第 34 轮：这里刻意用毫秒戳（29 字符），界面必须截成 10 字符日期再渲染。
+      entry({ id: 'ace-001', title: '自动那条', auto: true, updated: '2026-09-21T06:12:33.412+08:00', condition: '条件A', action: '做法A', rationale: '依据A' }),
       entry({ id: 'ace-002', title: '手写那条', auto: false, updated: '2026-09-20', condition: '条件B', action: '做法B', rationale: '' }),
     ]),
   });
@@ -556,6 +557,67 @@ test('记录页：行 = 编号 · 标题 · 更新日期 · 来源标签；点�
   await click(rows()[0]);
   assert.equal(findAll(hasClass('ace-entries-detail')).length, 1, '再点收起');
   assert.equal(rows()[0].props['aria-expanded'], 'false');
+});
+
+// —— 3b. 界面日期只到日（第 34 轮必修 4）——
+// 元数据时间戳是毫秒精度的 29 字符本地 ISO（lib/timestamp.js 的 nowStamp），
+// 而 .ace-entries-row-date 只有 84px 宽。这里断言的是**经 client 渲染后**的文本，
+// 不是测试自己 slice —— 截断必须发生在 client.js 的 displayDay 里。
+const millisToDay = (stamp) => String(stamp).slice(0, 10);
+
+test('记录页：毫秒时间戳渲染成 10 字符日期（截断在 client 侧，测试不代劳）', async () => {
+  const fullStamps = [
+    '2026-09-21T06:12:33.412+08:00',
+    '2026-09-20T23:58:07.001+08:00',
+  ];
+  const host = makeHost({
+    entries: entriesPayload([
+      entry({ id: 'ace-001', title: '毫秒戳那条', updated: fullStamps[0] }),
+      entry({ id: 'ace-002', title: '另一条毫秒戳', updated: fullStamps[1] }),
+    ]),
+  });
+  await mount(host);
+  await gotoEntries();
+
+  const dateCells = findAll(hasClass('ace-entries-row-date')).map((node) => textOf(node));
+  assert.equal(dateCells.length, 2, '每行一个日期格');
+  assert.deepEqual(dateCells.slice().sort(), ['2026-09-20', '2026-09-21'], '日期格就是 10 字符日期');
+  for (const cell of dateCells) {
+    assert.equal(cell.length, 10, '日期格长度必须恰好 10（毫秒戳 29 字符会挤爆 84px 的列）');
+    assert.match(cell, /^\d{4}-\d{2}-\d{2}$/, '日期格形如 YYYY-MM-DD');
+  }
+  // 截断必须发生在渲染链里：整行文本不许出现毫秒 / 时区偏移的痕迹。
+  const rowText = rowTexts().join(' ');
+  for (const stamp of fullStamps) {
+    assert.equal(rowText.includes(stamp), false, '整行不许回显原始毫秒戳：' + stamp);
+    assert.equal(rowText.includes('T' + stamp.slice(11, 19)), false, '整行不许回显时分秒');
+    assert.equal(rowText.includes('+08:00'), false, '整行不许回显时区偏移');
+  }
+  // 反向自证：上面断言的不是「测试自己 slice」——把同一批戳按毫秒精度渲染会得到 29 字符。
+  for (const stamp of fullStamps) {
+    assert.equal(stamp.length, 29, '夹具确实是 29 字符毫秒戳');
+    assert.equal(millisToDay(stamp).length, 10);
+  }
+});
+
+test('记录页：日期格兼容旧格式（只到日）、空值/垃圾值一律给「—」，绝不渲染 undefined', async () => {
+  const host = makeHost({
+    entries: entriesPayload([
+      entry({ id: 'ace-001', title: '旧格式', updated: '2026-09-05' }),
+      entry({ id: 'ace-002', title: '空串', updated: '' }),
+      entry({ id: 'ace-003', title: '缺失', updated: undefined }),
+      entry({ id: 'ace-004', title: '垃圾值', updated: '不是时间' }),
+    ]),
+  });
+  await mount(host);
+  await gotoEntries();
+
+  const cells = findAll(hasClass('ace-entries-row-date')).map((node) => textOf(node));
+  assert.equal(cells.length, 4);
+  assert.ok(cells.includes('2026-09-05'), '旧格式（只有日期）原样给出 10 字符');
+  assert.equal(cells.filter((cell) => cell === '\u2014').length, 3, '空串 / 缺失 / 垃圾值都是「—」（三条）');
+  assert.equal(cells.some((cell) => /undefined|null|NaN/.test(cell)), false, '绝不渲染 undefined / null / NaN');
+  assert.equal(rowTexts().join(' ').includes('undefined'), false, '整行文本也不许出现 undefined');
 });
 
 test('记录页：条件/做法为空时不渲染空白块', async () => {
@@ -788,4 +850,166 @@ test('统计页：天数读服务端 windowDays，缺字段回退 14', async () 
   await mount(legacy);
   const legacyText = textOf(pageById('stats'));
   assert.match(legacyText, new RegExp(DICTS.zh.statsDaily.replace('{n}', '14')), '缺字段回退 14');
+});
+// —— 10. 已归档分区（任务 2：条目浏览显示归档区）——
+// 归档条目由 parsePlaybook().archives 备好，经 GET /entries 的 archived / archivedTotal 返回。
+// 归档是软删除：界面上只有「看」，没有任何删除 / 还原 / 编辑入口（AGENTS.md 红线）。
+function archivedEntry(overrides = {}) {
+  return entry({
+    id: 'ace-101',
+    title: '旧条目',
+    condition: '旧条件',
+    action: '旧做法',
+    rationale: '旧依据',
+    auto: true,
+    archive: { reason: 'evicted', date: '2026-10-01' },
+    ...overrides,
+  });
+}
+
+const scopeButtons = () => findAll(hasClass('ace-entries-scope-btn'));
+const scopeButton = (label) => scopeButtons().find((node) => textOf(node) === label);
+const archivedRows = () => findAll(hasClass('ace-archived-row'));
+const archivedRowTexts = () => archivedRows().map((node) => textOf(node));
+const archivedCountLine = () => {
+  const node = findAll(hasClass('ace-archived-count'))[0];
+  return node ? textOf(node) : '';
+};
+
+test('已归档分区：默认活跃分区，切换后只展示归档条目（含归档原因与日期）', async () => {
+  const host = makeHost({
+    entries: entriesPayload([entry()], {
+      archived: [
+        archivedEntry(),
+        archivedEntry({ id: 'ace-102', title: '被合并条目', archive: { reason: 'merged', date: '2026-10-02' } }),
+        archivedEntry({ id: 'ace-103', title: '被取代条目', archive: { reason: 'superseded', date: '2026-10-03', supersededBy: 'ace-001' } }),
+      ],
+      archivedTotal: 3,
+    }),
+  });
+  await mount(host);
+  await gotoEntries();
+
+  // 默认活跃分区：归档行一条都不渲染（行类名也不同，不会污染 rows() 的计数）
+  assert.equal(rows().length, 1, '活跃分区只有 1 条活跃条目');
+  assert.equal(archivedRows().length, 0, '默认不渲染归档行');
+  assert.deepEqual(scopeButtons().map((node) => textOf(node)), [DICTS.zh.entriesScopeActive, DICTS.zh.entriesScopeArchived], '两个分区按钮');
+  assert.equal(scopeButton(DICTS.zh.entriesScopeActive).props['aria-pressed'], 'true', '默认选中活跃');
+
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  assert.equal(scopeButton(DICTS.zh.entriesScopeArchived).props['aria-pressed'], 'true', '切换后选中已归档');
+  assert.equal(rows().length, 0, '归档分区里没有活跃行（类名不复用）');
+  assert.equal(archivedRows().length, 3, '三条归档条目都渲染');
+  const texts = archivedRowTexts().join('\n');
+  assert.match(texts, /ace-101/, '归档行显示编号');
+  assert.match(texts, /旧条目/, '归档行显示标题');
+  assert.match(texts, /2026-10-01/, '归档行显示归档日期');
+  // 本文件的字典是真的 zh 字典（不是回显键名的 Proxy），所以断言文案原文。
+  // 第 33 轮：归档原因从「低分 / 过期 / 衰减」换成四种结构性原因，
+  // 这里覆盖其中三种（最少使用淘汰 / 合并 / 被取代）。
+  assert.match(texts, new RegExp(DICTS.zh.entriesArchiveReasonEvicted), '归档行显示原因（evicted 翻成字典文案）');
+  assert.match(texts, new RegExp(DICTS.zh.entriesArchiveReasonMerged), 'merged 有自己的文案');
+  assert.match(texts, new RegExp(DICTS.zh.entriesArchiveReasonSuperseded), 'superseded 有自己的文案');
+  // 三个原因文案必须互不相同，否则分列没有意义
+  assert.equal(new Set([
+    DICTS.zh.entriesArchiveReasonEvicted,
+    DICTS.zh.entriesArchiveReasonMerged,
+    DICTS.zh.entriesArchiveReasonSuperseded,
+  ]).size, 3, '三个归档原因各有独立文案');
+  // 归档条数行用 archivedTotal，而不是活跃的 total
+  assert.equal(archivedCountLine(), DICTS.zh.entriesArchivedCount.replace('{n}', '3'));
+  // 活跃分区的「共 N 条 / 上限 M 条」在归档分区不出现（不复用 .ace-entries-count）
+  assert.equal(countLine(), '', '归档分区不渲染活跃的计数行');
+});
+
+test('已归档分区：展开行显示归档原因/日期/被哪条取代，且没有任何删除或还原入口', async () => {
+  const host = makeHost({
+    entries: entriesPayload([], {
+      archived: [archivedEntry({ archive: { reason: 'superseded', date: '2026-10-03', supersededBy: 'ace-001' } })],
+      archivedTotal: 1,
+    }),
+  });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+
+  assert.equal(findAll(hasClass('ace-archived-detail')).length, 0, '默认收起');
+  assert.equal(archivedRows()[0].props['aria-expanded'], 'false');
+  await click(archivedRows()[0]);
+  assert.equal(archivedRows()[0].props['aria-expanded'], 'true', '点击展开');
+  assert.equal(findAll(hasClass('ace-archived-detail')).length, 1);
+  const detail = textOf(findAll(hasClass('ace-archived-detail'))[0]);
+  assert.match(detail, new RegExp(DICTS.zh.entriesArchiveReason), '详情里有归档原因');
+  assert.match(detail, new RegExp(DICTS.zh.entriesArchiveDate), '详情里有归档日期');
+  assert.match(detail, /2026-10-03/);
+  assert.match(detail, new RegExp(DICTS.zh.entriesArchiveSupersededBy), '详情里有「被哪条取代」');
+  assert.match(detail, /ace-001/);
+  assert.match(detail, new RegExp(DICTS.zh.entriesCondition), '正文（条件）仍可读');
+  assert.match(detail, new RegExp(DICTS.zh.entriesAction), '正文（做法）仍可读');
+
+  // 只读红线：归档分区里不出现任何删除/还原类按钮，也不出现编辑控件。
+  // 只看记录页这一棵子树 —— 设置页的「恢复默认值」是另一页的按钮，与归档无关。
+  const entriesNode = entriesPage();
+  const scoped = [];
+  walk(entriesNode, (node) => scoped.push(node));
+  const buttons = scoped.filter((node) => node.type === 'button').map((node) => textOf(node));
+  for (const text of buttons) {
+    assert.equal(/删除|移除|还原|恢复|delete|remove|restore|undelete/i.test(text), false, '归档分区不许有删除/还原入口：' + text);
+  }
+  assert.equal(scoped.filter((node) => hasClass('ace-entries-search')(node)).length, 0, '归档分区不提供搜索（只读浏览）');
+  assert.equal(scoped.filter((node) => node.type === 'input').length, 0, '归档分区没有输入控件');
+});
+
+test('已归档分区：archived 缺失（旧宿主）时按空处理，活跃分区照常', async () => {
+  const host = makeHost({ entries: entriesPayload([entry()]) }); // 不含 archived / archivedTotal
+  await mount(host);
+  await gotoEntries();
+  assert.equal(rows().length, 1, '活跃条目照常渲染');
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  assert.equal(archivedRows().length, 0, '没有归档条目');
+  assert.equal(textOf(findAll(hasClass('ace-archived-note'))[0]), DICTS.zh.entriesArchivedEmpty, '空态给一句说明');
+  assert.equal(archivedCountLine(), DICTS.zh.entriesArchivedCount.replace('{n}', '0'), '条数按 0 显示（缺失不等于故障）');
+});
+
+test('已归档分区：未知归档原因回显原串，不吞信息', async () => {
+  const host = makeHost({
+    entries: entriesPayload([], { archived: [archivedEntry({ archive: { reason: 'manual-cleanup', date: '2026-10-04' } })], archivedTotal: 1 }),
+  });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  assert.match(archivedRowTexts().join(''), /manual-cleanup/, '未知原因原样回显');
+});
+
+test('已归档分区：字典里归档相关键 zh/en 两侧齐全，占位符保留', async () => {
+  await mount(makeHost());
+  for (const key of [
+    'entriesScopeActive', 'entriesScopeArchived', 'entriesArchivedEmpty', 'entriesArchivedCount',
+    'entriesArchiveReason', 'entriesArchiveDate', 'entriesArchiveSupersededBy',
+    // 第 33 轮：四种结构性归档原因（低分 / 过期 / 衰减三条判据已整层删除）。
+    'entriesArchiveReasonSuperseded', 'entriesArchiveReasonRemoved',
+    'entriesArchiveReasonEvicted', 'entriesArchiveReasonMerged',
+    // 第 33 轮：设置页六个数字换血（注入批次 / 注入追加 / 检索命中 / 淘汰 / 合并 / 归档）。
+    'runtimeTitle', 'runtimeInjectBatches', 'runtimeInjectAppended', 'runtimeRetrievalHits',
+    'runtimeEvicted', 'runtimeMerged', 'runtimeArchived', 'runtimeArchivedByReason',
+    'runtimeInjectDetail', 'runtimeInjectHint', 'runtimeEvictHint', 'runtimeHint', 'runtimeUnavailable',
+  ]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(DICTS.zh, key), 'zh 缺键：' + key);
+    assert.ok(Object.prototype.hasOwnProperty.call(DICTS.en, key), 'en 缺键：' + key);
+  }
+  // 旧口径的键必须彻底消失（计分 / 考察位 / 未观测 / 闸门 / 低分 / 过期 / 衰减）。
+  for (const gone of [
+    'entriesArchiveReasonLowScore', 'entriesArchiveReasonStale', 'entriesArchiveReasonDecayed',
+    'runtimeRecaps', 'runtimeCandidates', 'runtimeWritten', 'runtimeScored',
+    'runtimeUnobserved', 'runtimeGateRejected', 'runtimeHealthDetail', 'runtimeHealthHint',
+    'runtimeProbation', 'runtimeHelpful', 'runtimeHarmful',
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(DICTS.zh, gone), false, 'zh 不该再有键：' + gone);
+    assert.equal(Object.prototype.hasOwnProperty.call(DICTS.en, gone), false, 'en 不该再有键：' + gone);
+  }
+  // runtimeEvictHint / runtimeInjectHint 是纯解释、不带数值，所以不进占位符清单（上面已断它们存在）。
+  for (const key of ['entriesArchivedCount', 'runtimeArchivedByReason', 'runtimeInjectDetail']) {
+    assert.match(DICTS.zh[key], /\{\w+\}/, 'zh 的 ' + key + ' 需要占位符');
+    assert.match(DICTS.en[key], /\{\w+\}/, 'en 的 ' + key + ' 需要占位符');
+  }
 });

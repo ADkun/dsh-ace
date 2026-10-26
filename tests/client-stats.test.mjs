@@ -148,7 +148,13 @@ function statsPayload(overrides = {}) {
     const day = String(30 - i).padStart(2, '0');
     daily.push({ date: '2026-09-' + day, count: i === 13 ? 3 : (i === 12 ? 1 : 0) });
   }
-  const recent = [1, 2, 3, 4, 5].map((n) => ({ id: 'ace-00' + n, title: '标题' + n, updated: '2026-09-2' + n }));
+  // 第 34 轮必修 4：第一条刻意用 29 字符毫秒戳（生产里 lib/timestamp.js 的 nowStamp 就是这个形状），
+  // 界面必须截成 10 字符日期 —— 全用 '2026-09-2n' 这种无毫秒夹具永远测不出问题。
+  const recent = [1, 2, 3, 4, 5].map((n) => ({
+    id: 'ace-00' + n,
+    title: '标题' + n,
+    updated: n === 1 ? '2026-09-21T06:12:33.412+08:00' : '2026-09-2' + n,
+  }));
   return {
     ok: true,
     reason: null,
@@ -370,6 +376,33 @@ test('统计块：规模快照、来源构成、14 天条形图、最近更新�
   assert.match(textOf(recent[0]), /ace-001/);
   assert.match(textOf(recent[0]), /标题1/);
   assert.match(textOf(recent[0]), /2026-09-21/);
+  // 第 34 轮必修 4：最近更新那个日期格**只到日**，且是客户端渲染的结果（不是测试自己 slice）。
+  const recentDates = findAll(hasClass('ace-stats-recent-date')).map((node) => textOf(node));
+  assert.equal(recentDates.length, 5, '五条各一个日期格');
+  assert.equal(recentDates[0], '2026-09-21', '毫秒戳截成 10 字符日期');
+  for (const cell of recentDates) {
+    assert.equal(cell.length, 10, '日期格长度必须恰好 10（毫秒戳 29 字符）');
+    assert.match(cell, /^\d{4}-\d{2}-\d{2}$/);
+  }
+  assert.equal(textOf(recent[0]).includes('+08:00'), false, '不渲染时区偏移');
+  assert.equal(textOf(recent[0]).includes('06:12:33'), false, '不渲染时分秒');
+});
+
+test('统计块：最近更新的日期格对空值 / 垃圾值给「—」，绝不渲染 undefined', async () => {
+  const host = makeHost({}, statsPayload({
+    recent: [
+      { id: 'ace-001', title: '空串', updated: '' },
+      { id: 'ace-002', title: '缺失', updated: undefined },
+      { id: 'ace-003', title: '垃圾值', updated: '不是时间' },
+      { id: 'ace-004', title: '旧格式', updated: '2026-09-05' },
+    ],
+  }));
+  await mount(host);
+  const cells = findAll(hasClass('ace-stats-recent-date')).map((node) => textOf(node));
+  assert.equal(cells.length, 4);
+  assert.equal(cells.filter((cell) => cell === '\u2014').length, 3, '空串 / 缺失 / 垃圾值都是「—」');
+  assert.equal(cells[3], '2026-09-05', '旧日期格式原样给出');
+  assert.equal(cells.some((cell) => /undefined|null|NaN/.test(cell)), false, '绝不渲染 undefined / null / NaN');
 });
 
 test('统计块：空态（相对路径需会话）只多一行引导，其余字段照常显示', async () => {
@@ -600,11 +633,13 @@ test('容量上限：默认值读 payload.bounds.defaults，placeholder 跟着�
 
   // 文案那一侧：字典里「默认」后面必须是 {d} 占位符，两侧（zh/en）都要有，
   // 且渲染点把 maxEntriesDefault 填进去（Proxy 字典看不到填值，用源码契约钉住）。
-  const zhDesc = Object.values(DICTS_ALL.zh).find((v) => typeof v === 'string' && /ace_curate/.test(v));
+  // 第 33 轮：容量上限的说明文案改写成了「先 LLM 合并、仍超则按命中次数淘汰」，
+  // 不再提 ace_curate，所以按「同时带 {d} 与 {min}/{max}」这条稳定的形状去找。
+  const zhDesc = Object.values(DICTS_ALL.zh).find((v) => typeof v === 'string' && v.includes('{d}') && v.includes('{min}'));
   assert.ok(zhDesc, 'zh 里有容量上限那条说明');
   assert.match(zhDesc, /默认 \{d\}/, 'zh 文案里默认值是 {d} 占位符');
   assert.equal(/默认 100/.test(zhDesc), false, 'zh 文案不再写死「默认 100」');
-  const enDesc = Object.values(DICTS_ALL.en).find((v) => typeof v === 'string' && /ace_curate/.test(v));
+  const enDesc = Object.values(DICTS_ALL.en).find((v) => typeof v === 'string' && v.includes('{d}') && v.includes('{min}'));
   assert.match(enDesc, /default \{d\}/, 'en 文案里默认值也是 {d} 占位符');
   assert.equal(/default 100/.test(enDesc), false, 'en 文案不再写死「default 100」');
 });
@@ -625,3 +660,160 @@ test('待合并已满：文案条数读 /inbox 的 cap，不再写死 20', async
   assert.equal(/\(20 条\)/.test(clientSource), false, '字典里不再写死「20 条」');
 });
 
+// —— 10. ACE 运行统计块（GET /stats 的 runtime 块）——
+// 六个数来自宿主进程内存（lib/index.js 的 recapStats / archiveStats / injectionStats），
+// 宿主重启即归零、刻意不落盘。类名一律 ace-runtime-*：上面那些按 .ace-stats-* 精确
+// 计数的断言（.ace-stats 恰好 1 个、.ace-stats-grid 恰好 1 个、.ace-stats-note 条数）不受影响。
+function runtimePayload(overrides = {}) {
+  return statsPayload({
+    runtime: {
+      // 第 33 轮：正负评分整层删除后只剩六个数字（注入批次 / 注入追加 / 检索命中 /
+      // 淘汰数 / 合并数 / 归档数）+ 四种结构性归档原因分列。数值各不相同，
+      // 映射写错（比如淘汰数读成合并数）不会被补 0 掩盖。
+      injectedBatches: 9,
+      injectedAppended: 7,
+      retrievalHits: 11,
+      evicted: 4,
+      merged: 3,
+      archived: 10,
+      // 四种原因合计必须等于 archived（superseded 2 + removed-by-request 1 + evicted 4 + merged 3 = 10）。
+      archivedByReason: { superseded: 2, 'removed-by-request': 1, evicted: 4, merged: 3 },
+      // 第 34 轮：陷阱字段。真实 runtime 是**精确七键**（上面那七个），injectedSkipped /
+      // injectedFailed 从来不在协议里 —— 以前设置页读它们，num(undefined) 兜成 '0'，
+      // 于是「跳过 0 · 失败 0」天天挂在界面上。这里故意放两个**非零**值：谁把这两格
+      // 加回去，渲染出来的就不再是假 0 而是 999/888，断言立刻打红（两头都钉死）。
+      injectedSkipped: 999,
+      injectedFailed: 888,
+      ...overrides,
+    },
+  });
+}
+
+const runtimeBlock = () => findAll(hasClass('ace-runtime'))[0];
+
+test('运行统计：六个计数格（注入批次/注入追加/检索命中/淘汰/合并/归档）按 runtime 渲染', async () => {
+  const host = makeHost({}, runtimePayload());
+  await mount(host);
+  const block = runtimeBlock();
+  assert.ok(block, '运行统计块渲染在统计页里');
+  const text = textOf(block);
+  assert.match(text, /runtimeTitle/, '有区块标题');
+  // 六个格子：每格一个 .ace-runtime-k（名字）+ .ace-runtime-v（数值）。
+  // 第 33 轮由 9 格 → 6 格：复盘/候选/落盘三格随计分统计一起删，
+  // 「计分变动」「未观测」「闸门拦下」三格随机制删除；新增「检索命中」「淘汰数」「合并数」。
+  const cells = findAll(hasClass('ace-runtime-cell'));
+  assert.equal(cells.length, 6, '恰好六个计数格');
+  const cellTexts = cells.map((node) => textOf(node));
+  assert.match(cellTexts[0], /runtimeInjectBatches/, '第一格是注入批次');
+  assert.match(cellTexts[0], /9/, '注入批次取自 runtime.injectedBatches');
+  assert.match(cellTexts[1], /runtimeInjectAppended/, '第二格是注入追加');
+  assert.match(cellTexts[1], /7/, '注入追加取自 runtime.injectedAppended（与批次是两个数）');
+  assert.match(cellTexts[2], /runtimeRetrievalHits/, '第三格是检索命中');
+  assert.match(cellTexts[2], /11/, '检索命中取自 runtime.retrievalHits');
+  assert.match(cellTexts[3], /runtimeEvicted/, '第四格是淘汰数');
+  assert.match(cellTexts[3], /4/, '淘汰数取自 runtime.evicted（不许读成合并数 3）');
+  assert.match(cellTexts[4], /runtimeMerged/, '第五格是合并数');
+  assert.match(cellTexts[4], /3/, '合并数取自 runtime.merged（不许读成淘汰数 4）');
+  assert.match(cellTexts[5], /runtimeArchived/, '第六格是归档数');
+  assert.match(cellTexts[5], /10/, '归档数取自 runtime.archived');
+  // 设置页不出现任何评分/考察位/闸门的内部字段名（计分整层删除后这些词不许回来）。
+  assert.equal(/helpful|harmful|statsHelpful|statsHarmful/.test(text), false, '不显示 helpful/harmful 字样');
+  assert.equal(/净分|考察位|runtimeScored|runtimeUnobserved|runtimeGateRejected/.test(text), false, '不显示净分/考察位/未观测/闸门字样');
+});
+
+test('运行统计：归档按四种结构性原因分列、注入明细只给 批次/追加 两数（跳过/失败已删）+ 两句人话解释', async () => {
+  const host = makeHost({}, runtimePayload());
+  await mount(host);
+  const block = runtimeBlock();
+  const text = textOf(block);
+  const lines = findAll(hasClass('ace-runtime-line')).map((node) => textOf(node));
+  // 第 33 轮由 5 行 → 4 行：归档原因 / 注入明细 / 注入口径解释 / 淘汰与合并口径解释
+  // （「未观测回合 · 闸门拦下」那一行随机制删除）。
+  assert.equal(lines.length, 4, '四行明细：归档原因 / 注入明细 / 注入口径解释 / 淘汰合并口径解释');
+  assert.match(lines[0], /runtimeArchivedByReason/, '归档原因那一行用 runtimeArchivedByReason');
+  assert.match(lines[1], /runtimeInjectDetail/, '注入明细那一行用 runtimeInjectDetail');
+  assert.match(lines[2], /runtimeInjectHint/, '第三行用一句人话解释批次与追加的区别');
+  assert.match(lines[3], /runtimeEvictHint/, '第四行用一句人话解释淘汰与合并');
+  assert.match(text, /runtimeHint/, '底部有一行说明这是内存态、不落盘');
+
+  // 本文件的字典是回显键名的 Proxy，看不到占位符被填成什么数，
+  // 所以：占位符用真字典断言，填值用源码契约钉住。
+  // 归档原因第 33 轮起是四个**结构性**值：superseded / removed-by-request / evicted / merged
+  // （低分 low-score、过期 stale、衰减 decayed 三判据随计分整层删除）。
+  assert.match(DICTS_ALL.zh.runtimeArchivedByReason, /\{superseded\}/, 'zh 归档原因文案有 {superseded} 占位符');
+  assert.match(DICTS_ALL.zh.runtimeArchivedByReason, /\{removed\}/, 'zh 归档原因文案有 {removed} 占位符');
+  assert.match(DICTS_ALL.zh.runtimeArchivedByReason, /\{evicted\}/, 'zh 归档原因文案有 {evicted} 占位符');
+  assert.match(DICTS_ALL.zh.runtimeArchivedByReason, /\{merged\}/, 'zh 归档原因文案有 {merged} 占位符');
+  assert.match(DICTS_ALL.en.runtimeArchivedByReason, /\{superseded\}[\s\S]*\{removed\}[\s\S]*\{evicted\}[\s\S]*\{merged\}/, 'en 四个占位符都在');
+  assert.equal(/\{low\}|\{stale\}|\{decayed\}/.test(DICTS_ALL.zh.runtimeArchivedByReason), false, 'zh 不再有 low/stale 占位符');
+  assert.match(clientSource, /fmt\(t\('runtimeArchivedByReason'\), \{[\s\S]*?superseded: num\(byReason\.superseded\),[\s\S]*?removed: num\(byReason\['removed-by-request'\]\),[\s\S]*?evicted: num\(byReason\.evicted\),[\s\S]*?merged: num\(byReason\.merged\),/, '四个数字都取自 runtime.archivedByReason');
+  // 第 34 轮：注入明细由「批次 / 追加 / 跳过 / 失败」四数收成「批次 / 追加」两数。
+  // 跳过与失败两个键**不在** runtime 协议里（七键：injectedBatches / injectedAppended /
+  // retrievalHits / evicted / merged / archived / archivedByReason），渲染它们等于
+  // 恒显示 num(undefined) === '0' 的假数字 —— 计数器本身还活着、继续进日志，只是不上界面。
+  assert.match(DICTS_ALL.zh.runtimeInjectDetail, /\{batches\}[\s\S]*\{appended\}/, 'zh 注入明细两个占位符都在');
+  assert.match(DICTS_ALL.en.runtimeInjectDetail, /\{batches\}[\s\S]*\{appended\}/, 'en 注入明细两个占位符都在');
+  assert.equal(/\{skipped\}/.test(DICTS_ALL.zh.runtimeInjectDetail), false, 'zh 注入明细不再有 {skipped} 占位符（runtime 没这个键）');
+  assert.equal(/\{failed\}/.test(DICTS_ALL.zh.runtimeInjectDetail), false, 'zh 注入明细不再有 {failed} 占位符（runtime 没这个键）');
+  assert.equal(/\{skipped\}/.test(DICTS_ALL.en.runtimeInjectDetail), false, 'en 注入明细不再有 {skipped} 占位符');
+  assert.equal(/\{failed\}/.test(DICTS_ALL.en.runtimeInjectDetail), false, 'en 注入明细不再有 {failed} 占位符');
+  // 行为面：真渲染出来的一行里，两个跳过/失败数字不许出现（两格已删）。
+  const injectDetailLine = lines[1];
+  assert.match(injectDetailLine, /runtimeInjectDetail/, '注入明细行照常渲染');
+  // 行为面：渲染出来的注入明细行必须只带两个数，不许出现「跳过 0 · 失败 0」这类假数字。
+  // 夹具（runtimePayload）里**故意塞进**两个不在协议里的字段 injectedSkipped/injectedFailed：
+  // 谁把这两格加回渲染，这一行就会渲染出真数（999/888）而不是假 0，照样被下面的断言打红。
+  assert.equal(/跳过/.test(injectDetailLine), false, '注入明细行不许出现「跳过」（两格已删）');
+  assert.equal(/失败/.test(injectDetailLine), false, '注入明细行不许出现「失败」（两格已删）');
+  // 陷阱值：谁把这两格连同字典占位符一起加回去，这一行就是 999/888（不是假 0），照样打红。
+  assert.equal(/999|888/.test(injectDetailLine), false, '注入明细行不许渲染 injectedSkipped / injectedFailed 的陷阱值');
+  // 一句话解释必须在设置页真的渲染出来（不许只躺在字典里）
+  assert.match(clientSource, /t\('runtimeInjectHint'\)/, '渲染点用 runtimeInjectHint');
+  assert.match(DICTS_ALL.zh.runtimeInjectHint, /批次[\s\S]*追加/, 'zh 解释把两个数说清');
+  assert.match(DICTS_ALL.en.runtimeInjectHint, /batch[\s\S]*appended/i, 'en 解释把两个数说清');
+  // 第 33 轮：检索命中 / 淘汰 / 合并三个新口径各要有一句人话解释，且必须真渲染出来。
+  assert.match(DICTS_ALL.zh.runtimeInjectHint, /检索命中[\s\S]*整本读取不计数/, 'zh 解释把检索命中的口径说清');
+  assert.match(DICTS_ALL.en.runtimeInjectHint, /Retrieval hits[\s\S]*whole playbook is not counted/i, 'en 解释把检索命中的口径说清');
+  assert.match(clientSource, /t\('runtimeEvictHint'\)/, '渲染点用 runtimeEvictHint');
+  assert.match(DICTS_ALL.zh.runtimeEvictHint, /命中次数从少到多/, 'zh 解释说清淘汰顺序');
+  assert.match(DICTS_ALL.zh.runtimeEvictHint, /创建更早的先走/, 'zh 解释说清同 hits 时老条目先走');
+  assert.match(DICTS_ALL.zh.runtimeEvictHint, /合并[\s\S]*LLM/, 'zh 解释说清合并是 LLM 做的');
+  assert.match(DICTS_ALL.en.runtimeEvictHint, /fewest hits first[\s\S]*older/i, 'en 解释说清淘汰顺序');
+  assert.match(DICTS_ALL.en.runtimeEvictHint, /Merged = pairs the LLM/, 'en 解释说清合并是 LLM 做的');
+  // 已删除的三格文案不许以任何形式回来。
+  for (const gone of ['runtimeScored', 'runtimeUnobserved', 'runtimeGateRejected', 'runtimeHealthDetail', 'runtimeHealthHint', 'runtimeRecaps', 'runtimeCandidates', 'runtimeWritten']) {
+    assert.equal(clientSource.includes(gone + ":"), false, '已删除的字典键 ' + gone + ' 不许回来');
+  }
+});
+
+test('运行统计：runtime 缺失（宿主没重启）只留一行灰字，手册统计块照常', async () => {
+  const host = makeHost(); // 既有 statsPayload 不含 runtime
+  await mount(host);
+  const block = runtimeBlock();
+  assert.ok(block, '运行统计块仍然渲染（不抛错）');
+  assert.equal(findAll(hasClass('ace-runtime-cell')).length, 0, '没有计数格');
+  assert.equal(findAll(hasClass('ace-runtime-hint')).length, 1, '只有一行提示');
+  assert.match(textOf(block), /runtimeUnavailable/);
+  // 手册统计块不受影响
+  assert.equal(findAll(hasClass('ace-stats-grid')).length, 1, '手册统计的规模格照常渲染');
+  assert.match(textOf(statsBlock()), /35 \/ 100/);
+});
+
+test('运行统计：不复用既有统计块的类名（.ace-stats-grid / .ace-stats-note 计数不变）', async () => {
+  const host = makeHost({}, runtimePayload());
+  await mount(host);
+  assert.equal(findAll(hasClass('ace-stats')).length, 1, '手册统计块仍恰好一个');
+  assert.equal(findAll(hasClass('ace-stats-grid')).length, 1, '规模格仍恰好一个');
+  assert.equal(findAll(hasClass('ace-runtime-grid')).length, 1, '运行统计用自己的网格类');
+  const notesInRuntime = [];
+  walk(runtimeBlock(), (node) => { if (hasClass('ace-stats-note')(node)) notesInRuntime.push(node); });
+  assert.equal(notesInRuntime.length, 0, '运行统计块里没有 .ace-stats-note（既有用例按它数灰字条数）');
+  // 统计页里两个块都在，且顺序是「手册统计」在前、「运行统计」在后
+  const statsPage = findAll((node) => node.props?.id === 'ace-page-stats')[0];
+  const order = [];
+  walk(statsPage, (node) => {
+    if (hasClass('ace-stats')(node)) order.push('stats');
+    if (hasClass('ace-runtime')(node)) order.push('runtime');
+  });
+  assert.deepEqual(order, ['stats', 'runtime'], '手册统计在前，运行统计在后');
+});

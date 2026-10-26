@@ -175,8 +175,10 @@ test('runRecap 返回 {skipped:true}：额度还回去、不推提示、下一�
     runRecap: async (a, pending) => { calls.recap.push(pending); return { skipped: true }; },
   });
   const st = controller.stateFor(agent);
-  // 注意 cooldown 的默认回退：shouldTriggerAutoRecap 里写的是 Number(config.autoRecapCooldownTurns) || 2，
-  // 所以显式配 0 也等价于 2。这里用 turn 5 / turn 6 让「被挡 / 没被挡」的差别有意义。
+  // 本文件的 makeController 默认 getConfig 就是 autoRecapCooldownTurns: 0 —— 第 35 轮起 0 是
+  // 合法值（「不冷却」，见 lib/trigger.js 的 numberOrDefault），所以 turn 5 → turn 6 之间没有冷却
+  // 可被白吃；本条用例要钉的是 runRecap 报 skipped 时「冷却回滚到 0 + 计数还回 2」这两笔额度，
+  // 而不是冷却本身。
   controller.countMutating(agent);
   controller.countMutating(agent);
   const out = controller.onTurnStopping({ agent, turn: 5 });
@@ -191,8 +193,8 @@ test('runRecap 返回 {skipped:true}：额度还回去、不推提示、下一�
   assert.equal(st.mutCount, 2, '这一轮的 mutating 计数必须还回来');
   assert.equal(st.lastRecapTurn, 0, '冷却必须回滚到触发之前');
   assert.equal(calls.notify.length, 0, '「没材料」不是失败，不许走 notifyFailure');
-  assert.ok(calls.logs.some(([lvl, m]) => lvl === 'info' && m.includes('没有可用的轨迹') && m.includes('还回')),
-    '要写一条 info 说明跳过并已还回额度');
+  assert.ok(calls.logs.some(([lvl, m]) => lvl === 'info' && m.includes('没有可复盘的材料') && m.includes('还回')),
+    '要写一条 info 说明跳过并已还回额度：' + JSON.stringify(calls.logs));
 
   // 下一回合：只干 1 次活就该立刻再次触发——冷却没被白吃（若 lastRecapTurn 停在 5，
   // turn 6 只有 6-5=1 < cooldown 2，会被挡下，正是缺陷 2 描述的那个症状）。
@@ -439,8 +441,8 @@ test('端到端：撞忙回队后冷却期内又记账，下一轮触发要把�
   const agent = makeAgent({ phase: 'running' });
   let busy = true;
   const { controller, calls } = makeController({
-    // cooldown 显式配 0，但 shouldTriggerAutoRecap 里是 Number(...) || 2，实际等价 2，
-    // 所以 5 → 6 被挡、5 → 7 放行，正是缺陷现场。
+    // 这里显式配 cooldown 2（= 默认值），所以 5 → 6 被挡（6-5=1 < 2）、5 → 7 放行（7-5=2 ≥ 2），
+    // 正是 D1 缺陷现场。注意：第 35 轮起显式配 0 就真的不冷却了，本条刻意不用 0。
     getConfig: () => ({ autoRecap: true, autoRecapThreshold: 1, autoRecapCooldownTurns: 2 }),
     runRecap: async (a, pending) => {
       calls.recap.push({ ...pending });
@@ -516,7 +518,7 @@ test('端到端：合并后的待办被放弃时，冷却回到最老那一笔�
   assert.equal(st.pending, null);
   assert.equal(st.mutCount, 5, '合并的 5 次一起还回来');
   assert.equal(st.lastRecapTurn, 0, '冷却还回最老那一笔的原值 0，不是 5');
-  assert.ok(calls.logs.some(([lvl, m]) => lvl === 'info' && m.includes('没有可用的轨迹')), '要写跳过日志');
+  assert.ok(calls.logs.some(([lvl, m]) => lvl === 'info' && m.includes('没有可复盘的材料')), '要写跳过日志：' + JSON.stringify(calls.logs));
 
   // 冷却没被白吃：回合 5 立刻就能再触发（5-0 ≥ 2）。若 lastRecapTurn 还回到旧待办那一轮 5，
   // 这里 5-5=0 < 2 会被挡掉，那几回合的活就白干了。
@@ -637,4 +639,5 @@ test('F1 端到端（busy 变体）：在飞的 p5 撞忙被拒时，3 次额度
   assert.equal(calls.recap[1].turn, 7);
   assert.equal(calls.recap[1].mutCount, 5, '执行时带着过继来的 5 次');
 });
+
 

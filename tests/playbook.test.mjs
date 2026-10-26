@@ -5,13 +5,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { parsePlaybook, serializePlaybook, applyOps, digestEntries, withLock, withExclusiveLock, writeFileAtomic, readOrInitPlaybook, readPlaybookSnapshot, detectConflicts, describeConflicts, restoreLock, matchEntries, querySegments, withFileLock, LOCK_STALE_MS, readIdHighWater, ensureIdHighWater, ID_HIGHWATER_RE } from '../lib/playbook.js';
+import { parsePlaybook, serializePlaybook, applyOps, digestEntries, withLock, withExclusiveLock, writeFileAtomic, readOrInitPlaybook, readPlaybookSnapshot, detectConflicts, describeConflicts, restoreLock, matchEntries, querySegments, withFileLock, LOCK_STALE_MS, readIdHighWater, ensureIdHighWater, ID_HIGHWATER_RE, markHits } from '../lib/playbook.js';
+import { readArchiveSnapshot } from '../lib/archive-file.js';
 import { detectAddConflicts, detectAllConflicts } from '../lib/merge.js';
-import { commitOps } from '../lib/commit.js';
+import { commitOps, commitMeta } from '../lib/commit.js';
 
 const E = (id, title, condition, action, rationale, overrides = {}) => ({
   id, title, condition, action, rationale: rationale || '',
-  meta: { created: '2026-01-01', updated: '2026-01-01', helpful: 0, harmful: 0, ...overrides.meta },
+  meta: { created: '2026-01-01', updated: '2026-01-01', hits: 0, lastHit: '', ...overrides.meta },
   extraLines: overrides.extraLines || [],
 });
 
@@ -24,20 +25,20 @@ const SAMPLE = [
   '- 条件：修改既有文件之前',
   '- 做法：先 read 再动手',
   '- 依据：盲改返工过两次',
-  '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=1 harmful=0',
+  '- 元数据：created=2026-01-01 updated=2026-01-01 hits=0 lastHit=',
   '',
   '### [ace-010] 增量演化',
   '- 条件：沉淀经验时',
   '- 做法：只做增/改/删',
-  '- 元数据：created=2026-01-02 updated=2026-01-02 helpful=0 harmful=0',
+  '- 元数据：created=2026-01-02 updated=2026-01-02 hits=0 lastHit=',
 ].join('\n') + '\n';
 
 test('parsePlaybook：文档头保留、条目字段与元数据解析、id 补零', () => {
   const { header, entries } = parsePlaybook(SAMPLE);
   assert.equal(header.length, 4);
   assert.equal(entries.length, 2);
-  assert.deepEqual(entries[0], E('ace-001', '编辑前先读', '修改既有文件之前', '先 read 再动手', '盲改返工过两次', { meta: { helpful: 1 }, extraLines: [''] }));
-  assert.equal(entries[0].meta.helpful, 1);
+  assert.deepEqual(entries[0], E('ace-001', '编辑前先读', '修改既有文件之前', '先 read 再动手', '盲改返工过两次', { extraLines: [''] }));
+  assert.deepEqual(entries[0].meta, { created: '2026-01-01', updated: '2026-01-01', hits: 0, lastHit: '' });
   assert.equal(entries[1].id, 'ace-010');
   assert.equal(entries[1].rationale, '');
 });
@@ -79,25 +80,27 @@ test('applyOps：空白差异不算重复（归一化后比较）', () => {
   assert.deepEqual(r.added, ['ace-011']);
 });
 
-test('applyOps：update 合并字段并刷新 updated 日期', () => {
+test('applyOps：update 合并字段并刷新 updated（毫秒时间戳，本地时区）', () => {
   const { entries } = parsePlaybook(SAMPLE);
   const r = applyOps(entries, [{ op: 'update', id: 'ace-001', action: '先完整 read 再动手' }], 60);
   assert.deepEqual(r.updated, ['ace-001']);
   assert.equal(r.entries[0].action, '先完整 read 再动手');
-  // 必须是本地时区口径（与 lib/stats.js 的 dateKey 一致）：toISOString() 是 UTC，
-  // UTC+8 早上 8 点前写进去的条目会拿到「昨天」，落进前一天的统计桶。
+  // 必须是本地时区口径：toISOString() 是 UTC，UTC+8 早上 8 点前写进去的条目会拿到「昨天」。
   const nowDate = new Date();
   const localToday = String(nowDate.getFullYear()) + '-'
     + String(nowDate.getMonth() + 1).padStart(2, '0') + '-'
     + String(nowDate.getDate()).padStart(2, '0');
-  assert.equal(r.entries[0].meta.updated, localToday);
+  assert.match(r.entries[0].meta.updated, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/, '毫秒精度 ISO');
+  assert.equal(r.entries[0].meta.updated.slice(0, 10), localToday, '日期部分走本地时区口径');
+  assert.equal(r.entries[0].meta.created, '2026-01-01', 'created 不动');
 });
 
 test('applyOps：today() 走本地时区口径 —— UTC+9 早上写进去的是「今天」而不是「昨天」', () => {
   // 旧实现用 new Date().toISOString().slice(0,10)（UTC 口径），而 lib/stats.js 的 dateKey
   // 是本地时区：UTC+8/9 早上 8 点前写入的条目日期是「昨天」，落进前一天的统计桶、当天桶为 0。
-  // 这里把系统时钟钉在 2026-03-04T23:30Z（东京本地 = 2026-03-05 08:30），
+  // 这里把系统时钟钉在 2026-03-04T23:30:00Z（东京本地 = 2026-03-05 08:30），
   // UTC 口径给 '2026-03-04'、本地口径给 '2026-03-05' —— 两者必然不同，断言不依赖跑测的时刻。
+  // 第 33 轮起时间戳升到毫秒精度并带本地时区偏移：2026-03-05T08:30:00.000+09:00。
   const RealDate = globalThis.Date;
   const prevTZ = process.env.TZ;
   try {
@@ -112,10 +115,10 @@ test('applyOps：today() 走本地时区口径 —— UTC+9 早上写进去的�
     };
     const { entries } = parsePlaybook(SAMPLE);
     const updated = applyOps(entries, [{ op: 'update', id: 'ace-001', action: '先完整 read 再动手' }], 60);
-    assert.equal(updated.entries[0].meta.updated, '2026-03-05', 'update 走本地日期');
+    assert.equal(updated.entries[0].meta.updated, '2026-03-05T08:30:00.000+09:00', 'update 走本地时区毫秒时间戳');
     const added = applyOps(entries, [{ op: 'add', title: '新经验', condition: 'c', action: 'a' }], 60);
-    assert.equal(added.entries[2].meta.created, '2026-03-05', 'add 的 created 同口径');
-    assert.equal(added.entries[2].meta.updated, '2026-03-05', 'add 的 updated 同口径');
+    assert.equal(added.entries[2].meta.created, '2026-03-05T08:30:00.000+09:00', 'add 的 created 同口径');
+    assert.equal(added.entries[2].meta.updated, '2026-03-05T08:30:00.000+09:00', 'add 的 updated 同口径');
   } finally {
     globalThis.Date = RealDate;
     if (prevTZ === undefined) delete process.env.TZ;
@@ -123,11 +126,25 @@ test('applyOps：today() 走本地时区口径 —— UTC+9 早上写进去的�
   }
 });
 
-test('applyOps：remove 删除条目', () => {
+test('P0-1｜applyOps：remove 是软删除——条目搬进 removedEntries（带 removed-by-request），正文一个字不丢', () => {
   const { entries } = parsePlaybook(SAMPLE);
   const r = applyOps(entries, [{ op: 'remove', id: 'ace-010' }], 60);
+  // 保留 result.removed 的既有语义（调用方与 ace_curate 返回值都看它）
   assert.deepEqual(r.removed, ['ace-010']);
+  // 活跃区不再有它
   assert.equal(r.entries.length, 1);
+  assert.equal(r.entries.some((e) => e.id === 'ace-010'), false);
+  // 但它必须作为归档条目出现在 removedEntries 里，四字段 + 元数据原样保留
+  assert.equal(r.removedEntries.length, 1);
+  const gone = r.removedEntries[0];
+  assert.equal(gone.id, 'ace-010');
+  assert.equal(gone.archived, true);
+  assert.equal(gone.archive.reason, 'removed-by-request');
+  assert.match(gone.archive.date, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/, '归档日期是毫秒精度本地时间戳');
+  assert.equal(gone.title, '增量演化');
+  assert.equal(gone.condition, '沉淀经验时');
+  assert.equal(gone.action, '只做增/改/删');
+  assert.equal(gone.meta.created, '2026-01-02', '元数据原样保留');
 });
 
 test('applyOps：事务式校验——任一 op 非法则整批拒绝、entries 不变', () => {
@@ -596,7 +613,7 @@ test('缺陷B｜commitOps：同批里一条冲突 + 一条安全 → 安全的�
     '### [ace-001] 标题A',
     '- 条件：条件A',
     '- 做法：做法A',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ].join('\n') + '\n', 'utf8');
   // 快照：ace-001 是「标题A」
@@ -608,7 +625,7 @@ test('缺陷B｜commitOps：同批里一条冲突 + 一条安全 → 安全的�
     '### [ace-001] 标题B',
     '- 条件：条件A',
     '- 做法：做法A',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ].join('\n') + '\n', 'utf8');
   const out = await commitOps(file, snapshot, [
@@ -634,7 +651,7 @@ test('缺陷B｜commitOps：整批都是冲突项 → 一条都不写盘，冲�
     '### [ace-001] 标题A',
     '- 条件：条件A',
     '- 做法：做法A',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ].join('\n') + '\n';
   await fs.writeFile(file, text, 'utf8');
@@ -691,7 +708,7 @@ test('缺陷C｜commitOps：删掉最高编号条目后新增 → 新编号大�
     '### [' + id + '] ' + title,
     '- 条件：c',
     '- 做法：a',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ];
   await fs.writeFile(file, ['# ACE 操作手册', '', ...mk('ace-001', 't1'), ...mk('ace-002', 't2'), ...mk('ace-003', 't3')].join('\n') + '\n', 'utf8');
@@ -706,6 +723,37 @@ test('缺陷C｜commitOps：删掉最高编号条目后新增 → 新编号大�
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
+test('P0-1｜commitOps：remove 落盘后条目进归档文件 archive.md（reason=removed-by-request）、活跃区不再有、编号不复用', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-remove-'));
+  const file = path.join(dir, 'playbook.md');
+  const archiveFile = path.join(dir, 'archive.md');
+  const mk = (id, title) => [
+    '### [' + id + '] ' + title,
+    '- 条件：c-' + id,
+    '- 做法：a-' + id,
+    '- 元数据：created=2026-01-01 updated=2026-01-01 hits=0 lastHit=',
+    '',
+  ];
+  await fs.writeFile(file, ['# ACE 操作手册', '', ...mk('ace-001', 't1'), ...mk('ace-002', 't2'), ...mk('ace-003', 't3')].join('\n') + '\n', 'utf8');
+  const snapshot = { entries: [E('ace-001', 't1', 'c-ace-001', 'a-ace-001', ''), E('ace-002', 't2', 'c-ace-002', 'a-ace-002', ''), E('ace-003', 't3', 'c-ace-003', 'a-ace-003', '')] };
+  const rm = await commitOps(file, snapshot, [{ op: 'remove', id: 'ace-003' }], 60, { archiveFile });
+  assert.deepEqual(rm.result.removed, ['ace-003'], 'result.removed 语义保留');
+  // 落盘后直接重新解析真实文件：活跃区没有它，归档文件里有它，且正文原样
+  const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-002'], '活跃区不再有被 remove 的条目');
+  const archived = (await readArchiveSnapshot(archiveFile)).entries;
+  const gone = archived.find((e) => e.id === 'ace-003');
+  assert.ok(gone, 'remove 的条目必须出现在归档文件（绝不物理删除）');
+  assert.equal(gone.archived, true);
+  assert.equal(gone.archive.reason, 'removed-by-request');
+  assert.equal(gone.title, 't3', '归档条目正文不得蒸发');
+  assert.equal(gone.action, 'a-ace-003');
+  // 归档文件里的编号也算用过的编号：新增不得复用 ace-003
+  const add = await commitOps(file, { entries: parsed.entries }, [{ op: 'add', title: 't4', condition: 'c4', action: 'a4' }], 60, { archiveFile });
+  assert.deepEqual(add.result.added, ['ace-004'], '编号不复用（高水位同时扫活跃区与归档文件）');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
 test('缺陷C｜commitOps：人手编辑插入高编号条目 → 下一个新增大于它', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-manual-id-'));
   const file = path.join(dir, 'playbook.md');
@@ -715,12 +763,12 @@ test('缺陷C｜commitOps：人手编辑插入高编号条目 → 下一个新�
     '### [ace-001] t1',
     '- 条件：c',
     '- 做法：a',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
     '### [ace-042] 人手插入的条目',
     '- 条件：c',
     '- 做法：a',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ].join('\n') + '\n', 'utf8');
   const snapshot = { entries: [E('ace-001', 't1', 'c', 'a', ''), E('ace-042', '人手插入的条目', 'c', 'a', '')] };
@@ -819,7 +867,7 @@ test('缺陷3｜并发改名 + 同标题新增 → 冲突被检出（走 commitO
     '### [ace-002] 重复标题',
     '- 条件：条件A',
     '- 做法：做法A',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ].join('\n'), 'utf8');
   // 自己持的是改名前的快照
@@ -843,12 +891,12 @@ test('缺陷4｜高水位标记被挪进条目体内 → 写回后全文只剩�
     '- 条件：c',
     '- 做法：a',
     '<!-- ace:id-highwater: 5 -->',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
     '### [ace-002] t2',
     '- 条件：c',
     '- 做法：a',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ].join('\n'), 'utf8');
   const snapshot = { entries: [E('ace-001', 't1', 'c', 'a', ''), E('ace-002', 't2', 'c', 'a', '')] };
@@ -874,12 +922,12 @@ test('缺陷5｜人手同时删掉最高编号条目与高水位标记 → 编�
     '### [ace-001] t1',
     '- 条件：c',
     '- 做法：a',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
     '### [ace-002] t2',
     '- 条件：c',
     '- 做法：a',
-    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=0 harmful=0',
+    '- 元数据：created=2026-01-01 updated=2026-01-01',
     '',
   ].join('\n'), 'utf8');
   const snapshot = { entries: [E('ace-001', 't1', 'c', 'a', ''), E('ace-002', 't2', 'c', 'a', '')] };
@@ -891,3 +939,178 @@ test('缺陷5｜人手同时删掉最高编号条目与高水位标记 → 编�
   assert.match(markerLines[0], /ace:id-highwater: 3/, '复用之后标记被重写为 3');
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
+
+// —— C1 元数据闭环：四字段解析 / 序列化 / 命中计数 / commitMeta 并发守卫 ——
+
+test('C1｜元数据解析：旧手册只有两个字段（没有 hits/lastHit）也能读，兜底 0/空串且不丢条目', () => {
+  const legacy = [
+    '# ACE 操作手册',
+    '',
+    '### [ace-001] 旧条目',
+    '- 条件：c',
+    '- 做法：a',
+    '- 元数据：created=2026-01-01 updated=2026-01-02',
+  ].join('\n') + '\n';
+  const { entries } = parsePlaybook(legacy);
+  assert.equal(entries.length, 1, '缺字段不许丢条目');
+  assert.deepEqual(entries[0].meta, {
+    created: '2026-01-01', updated: '2026-01-02', hits: 0, lastHit: '',
+  });
+});
+
+test('C1｜元数据解析：历史遗留的 helpful/harmful 字段被静默丢弃，不进 meta（计分已整层拆除）', () => {
+  const { entries } = parsePlaybook(['### [ace-009] t', '- 条件：c', '- 做法：a',
+    '- 元数据：created=2026-01-01 updated=2026-01-01 helpful=5 harmful=3 hits=2 lastHit=2026-02-03'].join('\n') + '\n');
+  assert.deepEqual(entries[0].meta, { created: '2026-01-01', updated: '2026-01-01', hits: 2, lastHit: '2026-02-03' });
+  assert.equal('helpful' in entries[0].meta, false, 'helpful 不许留在 meta 里');
+  assert.equal('harmful' in entries[0].meta, false, 'harmful 不许留在 meta 里');
+});
+
+test('C1｜元数据解析：完全没有元数据行的条目也兜底四字段（不报错）', () => {
+  const { entries } = parsePlaybook(['### [ace-007] 裸条目', '- 条件：c', '- 做法：a'].join('\n') + '\n');
+  assert.deepEqual(entries[0].meta, { created: '', updated: '', hits: 0, lastHit: '' });
+});
+
+test('C1｜元数据解析：新字段畸形值兜底（hits=abc → 0，lastHit 原样当字符串）', () => {
+  const { entries } = parsePlaybook(['### [ace-008] t', '- 条件：c', '- 做法：a',
+    '- 元数据：created=2026-01-01 updated=2026-01-01 hits=abc lastHit=2026-02-03'].join('\n') + '\n');
+  assert.equal(entries[0].meta.hits, 0);
+  assert.equal(entries[0].meta.lastHit, '2026-02-03');
+});
+
+test('C1｜元数据序列化：四个字段一律写全，顺序固定 created updated hits lastHit', () => {
+  // 只给一两个字段，其余必须补全（后续阶段依赖这个顺序）
+  const text = serializePlaybook({ header: [], entries: [E('ace-001', 't', 'c', 'a', '', { meta: { hits: 7, lastHit: '2026-02-09' } })] });
+  assert.match(text, /^- 元数据：created=2026-01-01 updated=2026-01-01 hits=7 lastHit=2026-02-09$/m);
+  // auto=true 排在最后，不许插进四字段中间
+  const auto = serializePlaybook({ header: [], entries: [E('ace-002', 't', 'c', 'a', '', { meta: { auto: true } })] });
+  assert.match(auto, /created=2026-01-01 updated=2026-01-01 hits=0 lastHit= auto=true$/m);
+});
+
+test('C1｜元数据往返：旧两字段文本 → parse → serialize 补全四字段 → 再 parse 完全等价', () => {
+  const legacy = ['# ACE 操作手册', '', '### [ace-001] 旧条目', '- 条件：c', '- 做法：a',
+    '- 元数据：created=2026-01-01 updated=2026-01-02'].join('\n') + '\n';
+  const first = parsePlaybook(legacy);
+  const rewritten = serializePlaybook({ header: first.header, entries: first.entries });
+  assert.match(rewritten, /created=2026-01-01 updated=2026-01-02 hits=0 lastHit=$/m, '序列化把缺失的字段补全');
+  assert.deepEqual(parsePlaybook(rewritten).entries, first.entries, '补全之后再解析完全等价（不丢条目、不改语义）');
+});
+
+test('C1｜元数据往返：带 hits/lastHit 的文本 parse→serialize→parse 幂等（第二次起文本逐字节相同）', () => {
+  const src = ['# ACE 操作手册', '', '### [ace-001] t', '- 条件：c', '- 做法：a',
+    '- 元数据：created=2026-01-01 updated=2026-03-05 hits=9 lastHit=2026-03-04'].join('\n') + '\n';
+  const once = serializePlaybook(parsePlaybook(src));
+  const twice = serializePlaybook(parsePlaybook(once));
+  assert.equal(once, src, '已经是四字段的文本，往返后逐字节不变');
+  assert.equal(twice, once);
+});
+
+test('C1｜markHits：命中条目 hits+1、lastHit=当天，未命中条目一个字段都不动', () => {
+  const entries = [
+    E('ace-001', 't1', 'c', 'a', '', { meta: { hits: 2 } }),
+    E('ace-002', 't2', 'c', 'a', ''),
+  ];
+  const before = entries[1];
+  const { entries: out, hit } = markHits(entries, ['ace-002'], '2026-03-04');
+  assert.deepEqual(hit, ['ace-002']);
+  assert.equal(out[1].meta.hits, 1);
+  assert.equal(out[1].meta.lastHit, '2026-03-04');
+  assert.equal(out[0].meta.hits, 2, '没被命中的条目一个字段都不动');
+  // 纯函数：入参没被就地改，meta 也没有共享引用（applyOps 的浅拷贝会让 meta 共享）
+  assert.notEqual(out[1], before, '返回的是新对象');
+  assert.equal(before.meta.hits, 0, '原对象未被就地修改');
+  assert.equal(out[0], entries[0], '未命中条目原样透传（同一个对象），绝不被改写');
+  assert.equal(out[0].meta.hits, 2);
+});
+
+test('C1｜markHits：多次命中累加，lastHit 记住最近一次', () => {
+  let entries = [E('ace-001', 't', 'c', 'a', '')];
+  entries = markHits(entries, ['ace-001'], '2026-03-01').entries;
+  entries = markHits(entries, ['ace-001'], '2026-03-05').entries;
+  assert.equal(entries[0].meta.hits, 2);
+  assert.equal(entries[0].meta.lastHit, '2026-03-05');
+});
+
+test('C1｜commitMeta：命中计数落盘（锁 + 原子写），未命中条目原样保留', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-hits-'));
+  const file = path.join(dir, 'playbook.md');
+  await fs.writeFile(file, [
+    '# ACE 操作手册',
+    '',
+    '### [ace-001] t1',
+    '- 条件：c1',
+    '- 做法：a1',
+    '- 元数据：created=2026-01-01 updated=2026-01-01 hits=0 lastHit=',
+    '',
+    '### [ace-002] t2',
+    '- 条件：c2',
+    '- 做法：a2',
+    '- 元数据：created=2026-01-01 updated=2026-01-01 hits=0 lastHit=',
+    '',
+  ].join('\n'), 'utf8');
+  const snapshot = { entries: [E('ace-001', 't1', 'c1', 'a1', ''), E('ace-002', 't2', 'c2', 'a2', '')] };
+  const out = await commitMeta(file, snapshot, {
+    ids: ['ace-001'],
+    apply: (entries, safeIds) => {
+      const res = markHits(entries, safeIds, '2026-03-04');
+      return { entries: res.entries, changed: res.hit };
+    },
+  });
+  assert.deepEqual(out.changed, ['ace-001']);
+  const after = await fs.readFile(file, 'utf8');
+  assert.match(after, /hits=1 lastHit=2026-03-04/, '命中的条目已计分并落盘');
+  assert.equal((after.match(/hits=0 lastHit= |hits=0 lastHit=\n/g) || []).length >= 1, true, '未命中的条目仍是 hits=0');
+});
+
+test('C1｜commitMeta：别的进程在快照之后改过该条目 → 按冲突跳过，不静默覆盖', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-scoreconflict-'));
+  const file = path.join(dir, 'playbook.md');
+  const write = (title) => fs.writeFile(file, [
+    '# ACE 操作手册',
+    '',
+    '### [ace-001] ' + title,
+    '- 条件：c1',
+    '- 做法：a1',
+    '- 元数据：created=2026-01-01 updated=2026-01-01 hits=0 lastHit=',
+    '',
+  ].join('\n'), 'utf8');
+  await write('标题A');
+  const snapshot = { entries: [E('ace-001', '标题A', 'c1', 'a1', '')] };
+  await write('标题B'); // 快照之后被别人改了
+  const out = await commitMeta(file, snapshot, {
+    ids: ['ace-001'],
+    apply: (entries, safeIds) => {
+      const res = markHits(entries, safeIds, '2026-03-04');
+      return { entries: res.entries, changed: res.hit };
+    },
+  });
+  assert.equal(out.conflicts.length, 1, '冲突要被回报');
+  assert.match(out.conflicts[0].reason, /已被修改/);
+  assert.deepEqual(out.changed, [], '冲突的条目不计分');
+  const after = await fs.readFile(file, 'utf8');
+  assert.ok(after.includes('标题B'), '别人的版本没被覆盖');
+  assert.match(after, /hits=0 lastHit=/, '冲突条目没有被计分');
+});
+
+test('C1｜commitMeta：没有任何安全项时一条都不写盘', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-scorenoop-'));
+  const file = path.join(dir, 'playbook.md');
+  const text = [
+    '# ACE 操作手册',
+    '',
+    '### [ace-001] t1',
+    '- 条件：c1',
+    '- 做法：a1',
+    '- 元数据：created=2026-01-01 updated=2026-01-01 hits=0 lastHit=',
+    '',
+  ].join('\n');
+  await fs.writeFile(file, text, 'utf8');
+  const out = await commitMeta(file, { entries: [E('ace-001', 't1', 'c1', 'a1', '')] }, {
+    ids: ['ace-001'],
+    apply: (entries) => ({ entries, changed: [] }),
+  });
+  assert.deepEqual(out.changed, []);
+  assert.equal(await fs.readFile(file, 'utf8'), text, '没有任何改动就不写盘');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+

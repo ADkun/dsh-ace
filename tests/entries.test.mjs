@@ -3,7 +3,7 @@
 // 不碰真实 DSH_HOME / 真实用户手册（C:\Users\<user>\.dsh\ace\playbook.md 只读不写）。
 //
 // 关于 HTTP 面的验证方式（与 tests/client-picker.test.mjs:16、tests/client-stats.test.mjs:17 同款）：
-// lib/index.js 顶层 import 了宿主包（@deepseek-ai/schemastery、dsh-tools、dsh-llm、dsh-timeout），
+// lib/index.js 顶层 import 了宿主包（@deepseek-ai/schemastery、dsh-tools、dsh-llm），
 // 本仓库不带 node_modules（见 tests/playbook-path.test.mjs:148 与 TESTING.md 未验证清单 13），
 // 所以 /entries 分支没法在 node:test 里被真正挂起来打一发请求。这里退一步做两件事：
 //   ① 行为面：直接跑该分支调用的那两个函数（collectPlaybookEntries / emptyEntries），
@@ -41,18 +41,18 @@ const SAMPLE = [
   '- 条件：条件一',
   '- 做法：做法一',
   '- 依据：依据一',
-  '- 元数据：created=2026-10-01 updated=2026-10-02 helpful=3 harmful=1',
+  '- 元数据：created=2026-10-01 updated=2026-10-02 hits=3 lastHit=2026-10-20T08:00:00.000+08:00',
   '',
   '### [ace-002] 标题二',
   '- 条件：条件二',
   '- 做法：做法二',
   '- 依据：依据二',
-  '- 元数据：created=2026-10-05 updated=2026-10-05 helpful=0 harmful=0 auto=true',
+  '- 元数据：created=2026-10-05 updated=2026-10-05 hits=0 lastHit= auto=true',
   '',
 ].join('\n');
 
 /** 条目的固定形状：字段与顺序都是对外契约（客户端按字段名直读）。 */
-const ENTRY_KEYS = ['id', 'title', 'condition', 'action', 'rationale', 'auto', 'created', 'updated', 'helpful', 'harmful'];
+const ENTRY_KEYS = ['id', 'title', 'condition', 'action', 'rationale', 'auto', 'created', 'updated', 'hits', 'lastHit'];
 
 /** 造临时目录，返回 { dir, file, cleanup }。 */
 function tempPlaybook(text) {
@@ -136,8 +136,8 @@ test('条目③：字段映射——正文取条目字段、元数据取 meta、
     auto: false,
     created: '2026-10-01',
     updated: '2026-10-02',
-    helpful: 3,
-    harmful: 1,
+    hits: 3,
+    lastHit: '2026-10-20T08:00:00.000+08:00',
   });
   assert.deepEqual(second, {
     id: 'ace-002',
@@ -148,19 +148,21 @@ test('条目③：字段映射——正文取条目字段、元数据取 meta、
     auto: true,
     created: '2026-10-05',
     updated: '2026-10-05',
-    helpful: 0,
-    harmful: 0,
+    hits: 0,
+    lastHit: '',
   });
 
-  // 类型也要钉住：id/正文/日期恒为 string，auto 恒为 boolean，helpful/harmful 恒为 number
+  // 类型也要钉住：id/正文/日期恒为 string，auto 恒为 boolean，hits 恒为 number
   for (const entry of result.entries) {
-    for (const field of ['id', 'title', 'condition', 'action', 'rationale', 'created', 'updated']) {
+    for (const field of ['id', 'title', 'condition', 'action', 'rationale', 'created', 'updated', 'lastHit']) {
       assert.equal(typeof entry[field], 'string', field + ' 应为 string');
     }
     assert.equal(typeof entry.auto, 'boolean');
-    assert.equal(typeof entry.helpful, 'number');
-    assert.equal(typeof entry.harmful, 'number');
+    assert.equal(typeof entry.hits, 'number');
   }
+  // 第 33 轮：正负评分整层删除，helpful / harmful 不许以任何形式残留在对外契约里。
+  assert.equal('helpful' in first, false, 'helpful 已随评分机制删除，条目形状里不许再有它');
+  assert.equal('harmful' in first, false, 'harmful 已随评分机制删除，条目形状里不许再有它');
 });
 
 test('条目③b：缺字段的条目给空串/0/false（客户端不必判空）', () => {
@@ -175,18 +177,18 @@ test('条目③b：缺字段的条目给空串/0/false（客户端不必判空�
     auto: false,
     created: '',
     updated: '',
-    helpful: 0,
-    harmful: 0,
+    hits: 0,
+    lastHit: '',
   }]);
   // toEntry 对空对象同样稳定（防御性：不炸、不出现 undefined）
   assert.deepEqual(toEntry({}), {
     id: '', title: '', condition: '', action: '', rationale: '',
-    auto: false, created: '', updated: '', helpful: 0, harmful: 0,
+    auto: false, created: '', updated: '', hits: 0, lastHit: '',
   });
-  // 元数据里 helpful 写了非数字：回落 0（与 parseMeta 的 Number(v) || 0 同口径）
-  const weird = collectEntries(parsePlaybook('### [ace-008] t\n- 元数据：created= updated= helpful=abc harmful=\n'));
-  assert.equal(weird.entries[0].helpful, 0);
-  assert.equal(weird.entries[0].harmful, 0);
+  // 元数据里 hits 写了非数字：回落 0（与 parseMeta 的 Number(v) || 0 同口径）
+  const weird = collectEntries(parsePlaybook('### [ace-008] t\n- 元数据：created= updated= hits=abc lastHit=\n'));
+  assert.equal(weird.entries[0].hits, 0);
+  assert.equal(weird.entries[0].lastHit, '');
   assert.equal(weird.entries[0].auto, false);
 });
 
@@ -339,7 +341,10 @@ test('条目⑦c：/stats 的 catch 兜底与成功路径同形（不再是缺�
   // 旧的残缺兜底 { ok: true, reason: 'unreadable' } 必须消失
   assert.equal(branch.includes("send(200, { ok: true, reason: 'unreadable' })"), false, '旧残缺兜底应已移除');
   // 改为 emptyStats(STATS_REASONS.unreadable, ...)：scale / daily / recent / source / windowDays / generatedAt 都在
-  assert.match(branch, /return send\(200, emptyStats\(STATS_REASONS\.unreadable, \{ maxEntries: live\.maxEntries \}\)\);/);
+  // C6 起还要带 runtime 块（本进程内存态的六项运行计数）——它和手册文件内容无关，降级分支也必须照带，
+  // 否则「手册读不到」时设置页的运行统计会整块消失。
+  assert.match(branch, /return send\(200, emptyStats\(STATS_REASONS\.unreadable, \{ maxEntries: live\.maxEntries, runtime: runtimeSnapshot\(\) \}\)\);/);
+  assert.equal((branch.match(/runtime: runtimeSnapshot\(\)/g) || []).length, 2, '成功路径与兜底路径都必须带 runtime');
 });
 
 test('条目⑦d：/inbox 的降级体带 reason，与「真的没有待合并条目」不再同形', () => {
@@ -360,7 +365,7 @@ test('条目⑦d：/inbox 的降级体带 reason，与「真的没有待合并�
 
 // —— ⑧ bounds 是设置页那半边的唯一边界出处（含默认值） ——
 
-test('条目⑧：describe() 的 bounds 带 defaults.maxEntries，默认值只有 DEFAULT_MAX_ENTRIES 一个出处', () => {
+test('条目⑧：describe() 的 bounds 带 defaults.*，默认值一律引用常量（第 36 轮起有四个键）', () => {
   const start = indexSource.indexOf('const describe = () => ({');
   assert.notEqual(start, -1, 'describe() 应在位');
   const body = indexSource.slice(start, indexSource.indexOf('});', start) + 3);
@@ -370,8 +375,11 @@ test('条目⑧：describe() 的 bounds 带 defaults.maxEntries，默认值只�
   assert.match(body, /autoRecapCooldownTurns: \[0, 1000\]/);
   // 默认值必须有唯一边界出处：bounds.defaults.maxEntries 直接引用常量。
   // 旧版两边各自写死（客户端文案「默认 100」、placeholder '100'），改常量就漂。
-  assert.match(body, /defaults: \{ maxEntries: DEFAULT_MAX_ENTRIES \}/, 'bounds 带出默认值且引用常量');
-  assert.equal(/defaults: \{ maxEntries: \d+ \}/.test(body), false, 'bounds 里不许写死默认值数字');
+  // 默认值必须有唯一边界出处：bounds.defaults.* 一律引用模块级常量。
+  // 第 36 轮起 defaults 里有四个键（三个新可调项 + maxEntries），所以不能再用「单键整体匹配」，
+  // 改成「maxEntries 那行的值必须是 DEFAULT_MAX_ENTRIES」+「四个键都不许写死数字」。
+  assert.match(body, /defaults: \{[\s\S]*?maxEntries: DEFAULT_MAX_ENTRIES/, 'bounds 带出默认值且引用常量');
+  assert.equal(/maxEntries: \d+/.test(body), false, 'bounds 里不许写死默认值数字');
   // 常量本身仍是 100（既有契约，T74 依赖它）。
   assert.equal(DEFAULT_MAX_ENTRIES, 100);
 });

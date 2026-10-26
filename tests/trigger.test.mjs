@@ -69,11 +69,97 @@ test('shouldTriggerAutoRecap: defaults work', () => {
   assert.equal(shouldTriggerAutoRecap({ mutCount: 1, lastRecapTurn: 0, currentTurn: 3 }, { autoRecap: true }), true);
   assert.equal(shouldTriggerAutoRecap({ mutCount: 0, lastRecapTurn: 0, currentTurn: 3 }, { autoRecap: true }), false);
 });
+
+// —— 第 35 轮：设置页文案承诺的「0」必须真的生效 ——
+// 文案（client.js:63 / client.js:65）：threshold「0 表示每次都触发」、cooldown「0 表示不冷却」。
+// 旧实现 Number(x) || 默认值 会把显式 0 兜成默认值，与文案不符；现在只有缺失 / 非有限数才回落。
+
+test('shouldTriggerAutoRecap: cooldown 显式配 0 = 不冷却（lastRecapTurn === currentTurn 也触发）', () => {
+  const config = { autoRecap: true, autoRecapThreshold: 1, autoRecapCooldownTurns: 0 };
+  // 最严的一档：上一回合就是本回合（差 0）。0 真的表示「不冷却」时必须放行。
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 10, currentTurn: 10 }, config), true,
+    'cooldown=0 表示不冷却，差 0 轮也要触发');
+  // 验收者实测的那一档（旧实现 10-9=1 < 2 被挡下）
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 9, currentTurn: 10 }, config), true);
+  // 表单输入框给的是字符串，'0' 同样是显式的 0
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 9, currentTurn: 10 },
+    { ...config, autoRecapCooldownTurns: '0' }), true, "字符串 '0' 也算显式 0");
+});
+
+test('shouldTriggerAutoRecap: threshold 显式配 0 = 每次都触发（mutCount 0 也触发）', () => {
+  const config = { autoRecap: true, autoRecapThreshold: 0, autoRecapCooldownTurns: 2 };
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 0, lastRecapTurn: 0, currentTurn: 10 }, config), true,
+    'threshold=0 表示每次都触发，一次都没动手也要触发');
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 0, lastRecapTurn: 0, currentTurn: 10 },
+    { ...config, autoRecapThreshold: '0' }), true, "字符串 '0' 也算显式 0");
+});
+
+test('shouldTriggerAutoRecap: 配置里没有这两个键 → 仍按默认 2 / 1（钉住「缺失才回落」）', () => {
+  // 只有 autoRecap 一个键：threshold 缺 → 默认 1、cooldown 缺 → 默认 2
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 1, lastRecapTurn: 0, currentTurn: 3 }, { autoRecap: true }), true);
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 0, lastRecapTurn: 0, currentTurn: 3 }, { autoRecap: true }), false,
+    'threshold 缺省仍是 1：一次都没动手不触发');
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 9, currentTurn: 10 }, { autoRecap: true }), false,
+    'cooldown 缺省仍是 2：差 1 轮被挡下');
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 8, currentTurn: 10 }, { autoRecap: true }), true,
+    'cooldown 缺省仍是 2：差 2 轮放行');
+  // 显式 undefined 与「键不存在」同义
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 9, currentTurn: 10 },
+    { autoRecap: true, autoRecapCooldownTurns: undefined }), false, 'undefined 按缺失处理');
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 0, lastRecapTurn: 0, currentTurn: 10 },
+    { autoRecap: true, autoRecapThreshold: undefined }), false, 'undefined 按缺失处理');
+});
+
+test('shouldTriggerAutoRecap: null / 空串 / 空白串按「没配」回落默认值（契约）', () => {
+  // 取舍（见 lib/trigger.js 的 numberOrDefault 注释）：Number(null) 与 Number('') 都是 0，
+  // 若照收就会把「输入框被清空 / 配置留了个空值」读成「用户要求最激进配置」，
+  // 所以 null / 空串 / 纯空白一律按「没配」回落默认 2 / 1；要 0 就显式写 0。
+  for (const empty of [null, '', '   ', '\t']) {
+    assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 9, currentTurn: 10 },
+      { autoRecap: true, autoRecapCooldownTurns: empty }), false,
+      'cooldown=' + JSON.stringify(empty) + ' 必须回落到默认 2（差 1 轮被挡）');
+    assert.equal(shouldTriggerAutoRecap({ mutCount: 0, lastRecapTurn: 0, currentTurn: 10 },
+      { autoRecap: true, autoRecapThreshold: empty }), false,
+      'threshold=' + JSON.stringify(empty) + ' 必须回落到默认 1（一次都没动手不触发）');
+  }
+  // 非有限数同样回落（NaN / Infinity），不许被当成 0
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 9, currentTurn: 10 },
+    { autoRecap: true, autoRecapCooldownTurns: NaN }), false, 'NaN 按缺失处理');
+  assert.equal(shouldTriggerAutoRecap({ mutCount: 5, lastRecapTurn: 9, currentTurn: 10 },
+    { autoRecap: true, autoRecapCooldownTurns: Infinity }), false, 'Infinity 不是有限数 → 回落默认 2（差 1 轮被挡）');
+});
+
+test('recordTurnEnd: cooldown 显式配 0 → 同一回合号再记一次也照样挂待办', () => {
+  const st = createRecapState();
+  st.mutCount = 2;
+  const first = recordTurnEnd(st, { turn: 7, config: { autoRecap: true, autoRecapThreshold: 1, autoRecapCooldownTurns: 0 } });
+  assert.equal(first.trigger, true);
+  assert.equal(st.lastRecapTurn, 7);
+  // 旧实现把 cooldown 0 兜成 2，这里 7-7=0 < 2 会被挡下（不挂待办）
+  st.pending = null;          // 模拟待办已被空闲边沿取走
+  st.mutCount = 1;
+  const second = recordTurnEnd(st, { turn: 7, config: { autoRecap: true, autoRecapThreshold: 1, autoRecapCooldownTurns: 0 } });
+  assert.equal(second.trigger, true, 'cooldown=0 表示不冷却，同一回合号也要触发');
+  assert.equal(second.pending.turn, 7);
+  assert.equal(second.pending.prevLastRecapTurn, 7, '记下改之前的 lastRecapTurn');
+  assert.equal(st.pendingSeq, 2, '第二份待办是第 2 代');
+});
+
+test('recordTurnEnd: threshold 显式配 0 → 本回合一次都没动手也挂待办', () => {
+  const st = createRecapState();
+  // mutCount 保持 0：旧实现 threshold 兜成 1，0 < 1 直接不触发
+  const out = recordTurnEnd(st, { turn: 5, config: { autoRecap: true, autoRecapThreshold: 0, autoRecapCooldownTurns: 2 } });
+  assert.equal(out.trigger, true, 'threshold=0 表示每次都触发');
+  assert.equal(out.pending.mutCount, 0, '待办照挂，计数就是 0');
+  assert.equal(out.pending.turn, 5);
+  assert.equal(st.lastRecapTurn, 5, '冷却照样推进');
+});
 // —— 自动复盘调度用的纯状态机（回合内记账 → 空闲边沿执行）——
 
 test('createRecapState: 初始为空状态', () => {
   const st = createRecapState();
   // pendingSeq 是待办代次（0 表示还没挂过任何待办），所有权判定靠它。
+  // 第 33 轮：lastOutcome（C2 三档信号）随回合成败判定一起删除，状态形状定死这五个字段。
   assert.deepEqual(st, { mutCount: 0, lastRecapTurn: 0, currentTurn: 0, pending: null, pendingSeq: 0 });
 });
 

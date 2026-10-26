@@ -405,6 +405,70 @@ test('buildRecapSummary: 轨迹缺失/为空时退化成只有计数那一行', 
   assert.ok(!buildRecapSummary({ mutCount: 3 }).includes('## 本回合轨迹'));
 });
 
+// —— 第 28 轮：本插件自己投递的注入消息不许进复盘轨迹（自污染防护）——
+//
+// 注入现在是一条 role='user' 的普通消息进了历史，正文就是手册里已有的经验条目。
+// 若照常渲染，Reflector 会把「手册已有的条目」当成「本轮用户说过的话」再提炼一遍。
+// 下面四条全部**真跑** renderTrajectory / collectTurnTrajectory，不是源码正则。
+
+/** 造一条注入消息（source 与 lib/inject-delivery.js 的 INJECTION_SOURCE_KIND/FORM 一致）。 */
+function injectionMsg(body = '【ACE 自动注入】与本回合最相关的 3 条经验（…）：\n1. [ace-012] 标题') {
+  return { id: 'm-inject', role: 'user', content: [text(body)], source: { kind: 'dsh-ace', form: 'injection' } };
+}
+
+test('第28轮｜注入消息整条不进轨迹：正文不出现、messageCount 不计它', () => {
+  const out = renderTrajectory([
+    msg('user', [text('把 a.txt 改成 b')]),
+    injectionMsg(),
+    msg('assistant', [text('好的')]),
+  ]);
+  assert.equal(out.text, ['用户: 把 a.txt 改成 b', '助手: 好的'].join('\n'));
+  assert.ok(!out.text.includes('ACE 自动注入'), '注入块不许出现在复盘轨迹里：' + out.text);
+  assert.ok(!out.text.includes('[ace-012]'), '被注入的条目 id 不许出现在轨迹里：' + out.text);
+  assert.equal(out.messageCount, 2, '被跳过的注入消息不计入 messageCount');
+});
+
+test('第28轮｜同一条消息去掉 source 后照常渲染（过滤只认 source，不认正文）', () => {
+  const plain = { id: 'm-inject', role: 'user', content: [text('【ACE 自动注入】… 1. [ace-012] 标题')] };
+  const out = renderTrajectory([plain]);
+  assert.equal(out.messageCount, 1);
+  assert.ok(out.text.startsWith('用户: 【ACE 自动注入】'), '没有 source 标记的同文本消息必须照常渲染：' + out.text);
+});
+
+test('第28轮｜只有 kind 相同但 form 不同的消息照常渲染（过滤不许过宽）', () => {
+  const cases = [
+    { name: 'notice', source: { kind: 'dsh-ace', form: 'notice' } },
+    { name: '其它插件的 injection', source: { kind: 'other-plugin', form: 'injection' } },
+    { name: '只有 kind', source: { kind: 'dsh-ace' } },
+    { name: '只有 form', source: { form: 'injection' } },
+    { name: 'kind 大小写不同', source: { kind: 'DSH-ACE', form: 'injection' } },
+  ];
+  for (const c of cases) {
+    const out = renderTrajectory([{ role: 'user', content: [text('正文')], source: c.source }]);
+    assert.equal(out.messageCount, 1, c.name + ' 必须照常渲染（过滤条件是两个字段同时命中）');
+    assert.equal(out.text, '用户: 正文', c.name);
+  }
+});
+
+test('第28轮｜collectTurnTrajectory 从真 session 取到的注入消息同样被跳过', () => {
+  const agent = {
+    session: {
+      deriveMessages: () => [msg('user', [text('真任务')]), injectionMsg(), msg('assistant', [text('做完')])],
+    },
+  };
+  const out = collectTurnTrajectory(agent);
+  assert.equal(out.text, ['用户: 真任务', '助手: 做完'].join('\n'));
+  assert.equal(out.messageCount, 2);
+});
+
+test('第28轮｜畸形 source 不抛错，也不许误伤（非对象 / 数组 / 字符串一律照常渲染）', () => {
+  for (const source of [null, 'dsh-ace', 42, [], [{ kind: 'dsh-ace' }], { kind: 42, form: 'injection' }]) {
+    assert.doesNotThrow(() => renderTrajectory([{ role: 'user', content: [text('正文')], source }]));
+    const out = renderTrajectory([{ role: 'user', content: [text('正文')], source }]);
+    assert.equal(out.text, '用户: 正文', '畸形 source=' + JSON.stringify(source) + ' 不许被当成注入消息');
+  }
+});
+
 test('lib/trajectory.js 红线：零 import（纯函数、不碰宿主包与磁盘）', async () => {
   const { readFile } = await import('node:fs/promises');
   const { fileURLToPath } = await import('node:url');
@@ -416,7 +480,7 @@ test('lib/trajectory.js 红线：零 import（纯函数、不碰宿主包与磁�
 });
 // —— lib/index.js 服务半边：自动复盘喂料的源码级断言 ——
 //
-// lib/index.js 顶层 import 了宿主包（@deepseek-ai/schemastery、dsh-tools、dsh-llm、dsh-timeout），
+// lib/index.js 顶层 import 了宿主包（@deepseek-ai/schemastery、dsh-tools、dsh-llm），
 // 本仓库无 node_modules，测试里 import 不到。所以和 tests/entries.test.mjs 同款做法：
 // 读源码、把 runRecap 那段切出来，钉住「喂真轨迹」这件事不被回退。
 const indexSource = readFileSync(fileURLToPath(new URL('../lib/index.js', import.meta.url)), 'utf8');
@@ -442,10 +506,11 @@ test('lib/index.js runRecap：从宿主取真轨迹并拼进 summary（不回退
   assert.ok(body.includes('collectTurnTrajectory(agent'), '必须从宿主会话取轨迹');
   assert.ok(body.includes('buildRecapSummary({ mutCount: pending.mutCount, trajectory })'),
     'summary 必须由计数 + 轨迹共同构成');
-  assert.ok(body.includes('executeRecap({ agent, summary, signal })'), 'executeRecap 只换喂料，不改签名');
+  // 第 33 轮：回合成败判定（三档信号 turnOutcome）整层删除，executeRecap 只剩 {agent, summary, signal}。
+  assert.ok(body.includes('executeRecap({ agent, summary, signal })'), 'executeRecap 只收 {agent, summary, signal}');
+  assert.equal(/turnOutcome/.test(body), false, 'runRecap 不再收 turnOutcome（回合成败判定已删）');
   assert.ok(!/summary: '自动复盘：本回合有 ' \+ pending\.mutCount/.test(body),
     '不许回退成只喂「本回合有 N 次 mutating 工具调用」这句计数');
-  assert.ok(!body.includes("outcome:"), 'executeRecap 的签名不许在这里被改');
 });
 
 test('lib/index.js runRecap：轨迹为空就不调 LLM，只写一条 info 日志', () => {
