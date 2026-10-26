@@ -2,7 +2,7 @@
 title: dsh-ace 测试指南
 owner: dsh-ace 维护者
 status: current
-last_reviewed: 2026-10-21
+last_reviewed: 2026-10-26
 ---
 
 # 测试
@@ -15,7 +15,7 @@ last_reviewed: 2026-10-21
 npm test
 ```
 
-当前 282 条用例：281 通过 + 1 条在 Windows 上条件跳过（T47 文件权限位，见未验证清单 7）。**上一轮「自动复盘喂料修复（喂真轨迹）」净增 15 条**：新增 tests/trajectory.test.mjs 18 条（T160–T177），同时删掉 tests/trigger.test.mjs 里 3 条 `hasNoRunningSubagents` 用例（该函数已随子代理门一起删除）。**本会话第二轮「3 条遗留缺陷修复」净增 10 条（T178–T187）**：tests/trajectory.test.mjs 由 18 条增至 23 条（+5：长回合超限后任务目标仍在、maxChars 极端值不抛错、并行 tool-call 按 id 绑定、toolCallId 查不到时回退、映射不跨调用串味）、tests/trigger.test.mjs +3（`prevLastRecapTurn` 记旧值、`abandonPendingRecap` 回滚后立刻可再触发、畸形输入不抛错）、tests/recap.test.mjs +2（`{skipped:true}` 回滚额度且不推提示、非 skipped 返回值不回滚）。同时既有 6 条用例按新事实改写期望（T161/T165/T169/T176 的格式升级与 `return {skipped:true}` 等），只换期望值、未放宽也未删除任何断言。其中「记录列表详情页」的只读条目清单新增 14 条（T133–T146，tests/entries.test.mjs）：空手册 / 正常手册（auto 与非 auto）/ 字段映射 / 四种降级（missing、unreadable、needs-session）/ maxEntries 透传 / 只读红线 / `GET /api/dsh-ace/entries` 的 200 体形状与源码级契约，以及 `/stats` catch 兜底改成同形零值 payload 的断言。其中只读统计 16 条（T117–T132）为「设置页只读手册统计」新增：纯函数与读盘降级 10 条（tests/stats.test.mjs）、统计块渲染 / 四种 reason 降级 / 刷新时机 6 条（tests/client-stats.test.mjs）。其中手册路径解析链 9 条（T48–T56）、跨进程文件锁 4 条（T57–T60）、跨进程锁覆盖整个读-改-写区间 3 条（T61–T63）为「手册默认本机共享层」改造新增；跨进程锁语义返工又新增 4 条（T64–T67，见下表）；并发冲突检测（快照 + 冲突报错）再新增 3 条（T68–T70，见下表）；锁的重入与回收兜底 3 条（T71–T73）与核心默认值 1 条（T74）见下表。**逐条冲突判定 + add 参与冲突检测 + 编号不复用**这轮改造新增 16 条：单元 12 条（T75–T86，见下表）与真实子进程并发 4 条（T87–T90，见下表，测试文件 tests/concurrency.test.mjs，脚本写在系统临时目录、用完即删，仓库里不留脚本）。**自动复盘触发时机迁到空闲边沿**这轮新增 19 条：纯状态机 8 条（T91–T98，tests/trigger.test.mjs）与调度器行为 11 条（T99–T109，tests/recap.test.mjs，见下表）。**独立对抗性验收发现的 8 个缺陷修复**这轮新增 7 条（T110–T116）：近似层只比正文、同领域不同经验不判冲突、相似度百分比封顶 100%、并发改名 + 同标题新增被检出、高水位标记归位且全文只留一份、无标记时编号复用一次的行为钉住（见下表）。语法自检：对每个 `lib/*.js` 跑 `node --check`；`package.json` 以 `JSON.parse` 校验。
+当前 **546 条用例：545 通过 + 1 条在 Windows 上条件跳过（T47 文件权限位，见未验证清单 7）**，`duration_ms` 约 5.1–20s（`node --test tests/`，**34 个测试文件**，无网络无构建）。**第 33 轮「拆除正负评分 → 最少使用淘汰」净减 78 条**：整份删掉 tests/gate.test.mjs（19 条，三层可复用性闸门）与 tests/probation.test.mjs（13 条，考察位）；重写 tests/recap-usage.test.mjs（25 → 12 条，计分/结算/pendingIds 那一整层换成命中账本 + 回合边界落盘 + 毫秒时间戳）、tests/trigger.test.mjs（47 → 46 条，删 C2 三档信号整段）、tests/playbook.test.mjs（净分与归档区章节相关用例删掉）、tests/archive.test.mjs（40 → 21 条，三判据整层换成绩效判据 = 淘汰顺序 + 独立归档文件）、tests/inject.test.mjs（16 → 17 条，排序键换纯 BM25）、tests/injection-flow.test.mjs（9 → 8 条）、tests/recap-pipeline.test.mjs（20 → 12 条，候选过滤与合并/淘汰重写）、tests/e2e.test.mjs（7 → 8 条）；整份新增 tests/prompts.test.mjs（5 条），tests/merge.test.mjs 由 10 条扩到 17 条。
 **本会话第三轮「3 条验收遗留项修复」再净增 4 条（T188–T191）**：tests/trajectory.test.mjs 由 23 条增至 25 条（+2：退化分支的省略数恒等于真实丢弃数、整条 summary ≤ maxChars）、tests/trigger.test.mjs +2（await 窗口内挂上新待办时旧 pending 回滚不吞新待办、同一份待办重复放弃只生效一次）。总数从 238 → 242（241 通过 + 1 skip）。语法自检同前：每个 `lib/*.js` 跑 `node --check`，`package.json` 以 `JSON.parse` 校验。
 **本会话第四轮「3 条验收新缺陷修复」再净增 7 条（T192–T198）**：tests/trigger.test.mjs 由 23 条增至 27 条（+4：新待办已被另一个空闲边沿取走时迟到回滚被拒、`restorePendingMutCount` 正常路径只还计数不回滚冷却、`restorePendingMutCount` 遇到更新的待办时一个字段都不动、requeue 后再次 take 同一份待办再放弃仍生效）、tests/recap.test.mjs 由 13 条增至 15 条（+2：失败分支只在待办仍归我时才还计数、两个空闲边沿交错时迟到的 skipped 回滚被拒且不谎报已还回）、tests/trajectory.test.mjs 由 25 条增至 26 条（+1：`maxChars` 小于计数行长度时以保证计数行完整为准）。总数从 242 → 249（248 通过 + 1 skip）。同时既有 3 条用例按新事实改期望（`createRecapState` 初始状态多了 `pendingSeq: 0`；`recordTurnEnd` 挂的待办多了 `seq`，T90/T190 与 recap 的「空闲边沿才真正触发复盘」同步），只换期望值、未放宽也未删除任何断言。语法自检同前：每个 `lib/*.js` 跑 `node --check`，`package.json` 以 `JSON.parse` 校验。
 **本会话第五轮「4 条自动复盘回滚缺陷修复」再净增 8 条（T199–T206）**：tests/trigger.test.mjs 由 27 条增至 33 条（+6：`requeuePendingRecap` 遇到更新的待办时明确拒绝放回、耗尽分支也不许抹掉队列里那份、`restorePendingMutCount` 幂等、两条回滚路径共用已结算账本、`requeuePendingRecap` 不算结算、`ownsPending` 旧形状兜底在代次已前进时一律不认），tests/recap.test.mjs 由 15 条增至 17 条（+2：撞忙回队时不覆盖更新待办且不谎报「已放回队列」、撞忙重试到上限时仍保留队列里那份更新的待办）。总数从 249 → 257（256 通过 + 1 skip）。**这一轮没有改动任何既有用例**：新增的所有权判定只拦「本就不归自己」的调用，既有手工构造旧形状待办的用例都走 `pendingSeq === 0` 那一档，全部照旧通过。语法自检同前：每个 `lib/*.js` 跑 `node --check`，`package.json` 以 `JSON.parse` 校验。
@@ -24,6 +24,86 @@ npm test
 
 **本会话第八轮「通知消息 content 形状修复 + 两条 trigger 硬化」再净增 10 条（T222–T229 + T230/T231）**：新增 tests/notice.test.mjs 8 条（T222–T229，纯模块直测 + 对 lib/index.js 的源码级断言）、tests/trigger.test.mjs 由 44 条增至 46 条（+2：H3 过继搬移抛错时额度不蒸发、账本也没封；H4 负数 mutCount 不许把 st.mutCount 往回拽）。总数从 272 → 282（281 通过 + 1 skip）。**这一轮修的是一个会让整个会话永久坏死的缺陷**：自动复盘失败时注入的通知消息把 `content` 传成了裸字符串，宿主 `createUserMessage` 不校验形状（`~\@deepseek-ai\dsh-llm\lib\types\message.js:34-39` 的 `createMessage` 只 spread + `deepFreeze(structuredClone)`、`:53-58` 的 `createUserMessage` 只补一个 `role`），于是字符串原样进了会话历史；此后宿主里 52 处 `.content.some(...)` 拿它当数组调用抛 `TypeError: message.content.some is not a function`，而每一轮重建上下文都要遍历历史，这条毒消息让会话再也开不起来（用户再发「继续」照样失败）。三处注入点（`conflictMessage`、自动复盘失败通知 `notifyFailure`、`/ace review`）改为经新增的零 import 模块 lib/notice.js 的 `noticeMessage()` 构造 `ContentBlock[]`，**文案与 source 一字未改**——这是形状修复，不是文案改版（T229 守着文案，T227/T228 守着形状）。**T227 的定位要说准**：它是「防手滑把 content 写回裸字符串」的**绊线**，不是「证明形状正确」的**证明**——它不推理、不是类型检查器，已知至少 5 个刻意绕过时的漏点（`content: [text]` 数组里塞裸字符串、`content: textBlocks(t) + ''` 把返回值拼成字符串、`content: noticeMessage({text}).content.join('')` 取完又拼回去、别名调用 `const cum = createUserMessage; cum({...})` 计数 0 完全看不见、`createUserMessage(['just a string'])` 数组元素形状不管）；它的价值在「有人为了让自己过而放宽它」时提醒：放宽等于拆掉唯一的绊线（它取的是 `content:` 之后的**首个非空行**，所以 `createUserMessage(\n  noticeMessage({...}),\n)` 这类跨行合法写法不会被冤枉）。语法自检同前：每个 `lib/*.js` 跑 `node --check`，`package.json` 以 `JSON.parse` 校验。
 
+**本阶段「第三阶段：接线 + 可观测 + 归档展示 + 端到端演练」净增 8 个测试文件 / 全量 439 条（438 通过 + 1 skip）**。前两阶段（C1–C5）新增 7 个纯模块测试文件：tests/archive.test.mjs（27）、tests/inject.test.mjs（16）、tests/injection-flow.test.mjs（7）、tests/ledger.test.mjs（5）、tests/prompt-section.test.mjs（14）、tests/recap-pipeline.test.mjs（14）、tests/reflect.test.mjs（13）；本阶段（C6）新增 tests/e2e.test.mjs（7）。同时扩了三个既有文件：tests/client-stats.test.mjs 由 16 增至 20（+4：运行统计六项渲染、归档按原因四值分列、runtime 缺失只留灰字、不复用既有类名）、tests/client-entries.test.mjs 由 19 增至 24（+5：默认活跃/切到已归档、展开显示原因与日期、archived 缺失按空处理、未知原因回显原串、21 键 zh/en 齐全）、tests/stats.test.mjs 与 tests/entries.test.mjs 补了 runtime / 归档分区的接口形状断言。**基线演进**：383/382/1（阶段 0）→ 393 → 400 → 420 → 427 → 428 → 439（本阶段收尾）。**本阶段唯一被改动的既有断言**是 tests/client-stats.test.mjs 的「归档原因恰好三个占位符」——P0-1 起 `op:'remove'` 也搬进归档区、归档原因变成四个值（多一个 `removed-by-request`），该断言随之放宽为「四个占位符都在」（这是加宽而非放松：新增的第四项同样被逐个 assert.match 钉住）；其余既有断言**一条未改、一条未放宽**。
+
+**后续两轮「注入账本要跨回合结算（B1/B2）+ 四条并发口径（D1–D4）」再净增 1 个测试文件 / 11 条 / 全量 450 条（449 通过 + 1 skip）**：新增 tests/recap-usage.test.mjs 9 条（回合边界结算的九种情形，见下表）；tests/injection-flow.test.mjs 由 7 条增至 8 条（+1：**D4｜子代理注入照常渲染但绝不进命中账本**）；tests/recap-pipeline.test.mjs 由 14 条增至 15 条（+1：`P0-4｜0 候选回合也不碰账本（D4）`，同时把「流水线自己 take 账本」的旧用例改成 tripwire——`takeUsageIds` 一被调用就抛 `流水线不许自己取账本：注入 id 只能由回合边界取走（D4）`）。**基线演进接着上一段**：439 → 450（449 通过 + 1 skip），测试文件数 25 → 26。既有断言同样一条未放宽：被改的两条是「行为契约变了」（取走点从流水线搬到回合边界），新断言比旧的更严格。
+
+**再后一轮「在飞结算与归档抢跑（P1）+ 三处硬化（P2）」净增 4 条 / 全量 454 条（453 通过 + 1 skip）**：tests/recap-usage.test.mjs 由 9 条增至 **11** 条（+2：两个空闲边沿重叠时第二个边沿**等同一份在飞结算**、归档扫描不许抢在计分落盘之前——造 net = 1 − 2×2 = −3 正好压 low-score 线，断言没有冲突通知也没有「条目已被删除」warn；同一重叠场景下结算抛错时第二个边沿先等它失败再往下走、错误被吞掉不炸空闲边沿）；tests/recap-pipeline.test.mjs 由 15 条增至 **16** 条（+1：实际计分 0 条时日志写实话，不许出现「命中计数 +1 共 0 条」）；tests/catalog.test.mjs 由 5 条增至 **6** 条（+1：超时不 abort 上游——宿主 `listModels` 没有 `signal`，上游晚到的 reject 必须被吞掉、不许变成 unhandledRejection）。tests/wiring.test.mjs 条数不变（11），但静态求差扫描器补了三处漏判（模板 `${}` 递归扫描、控制流括号不再被当成形参、去掉 `'?'` 跳过），四条假绿通道各有一条人造样本。**基线演进接着上一段**：450 → 454（453 通过 + 1 skip），测试文件数仍是 26（本轮没有新增文件）。
+
+**第八轮「账本结算的前置不变量（D1′/D2′/D3′）+ 扫描器补两条通道（P2-b）+ 0 条日志中性归因（P2-c）」净增 4 条 / 全量 458 条（457 通过 + 1 skip）**：tests/recap-usage.test.mjs 由 11 条增至 **15** 条——新增 4 条**真跑流水线**用例（真 `runRecapPipeline` + 真 `scoreUsedIds` + 真 `commitArchives`，**没有任何 `runRecap` 桩**）：D1′ 结算窗口里又挂上一批注入（账本在窗口里重新长出来）、D2′ 结算窗口里跨过一个完整回合边界（**单个边沿就够**，不需要两个边沿并发）、D3′ 结算失败（锁超时 / 写盘失败）、D3′-上限（连续失败到上限、账本按 B1 的规则丢弃之后才允许跑复盘）；并**改写 1 条旧用例**（原 `P1｜结算失败：本空闲边沿不许「照常跑复盘」…` 原先只是把「失败后照常跑复盘」钉成期望，现在改成新语义，并把执行顺序断言加严为五事件逐字比对）。tests/recap-pipeline.test.mjs 仍是 16 条（P2-c 改的是 0 条那一支的日志措辞，用例未增减）；tests/wiring.test.mjs 仍是 11 条（P2-b 给静态求差扫描器补了两条假绿通道：正则字面量分支——含把 `//` 注释误当空正则吃掉的那处修正，以及逗号表达式间接调用 `sequenceRe`；新增人造样本 4 条，对真文件求差仍是空集）。**基线演进接着上一段**：454 → 458（457 通过 + 1 skip），测试文件数仍是 26。
+
+**第九轮「归档必须读结算后的分数：从时序约定改成数据约束（路线 A）+ 编号复用缺陷」净增 12 条 / 全量 470 条（469 通过 + 1 skip）**：tests/recap-usage.test.mjs 由 15 条增至 **20** 条（+5：结算写盘前被归档扫描抢到锁——probe7-f，写盘前故意慢 40ms 再让第二个边沿扫、刚注入且本回合成功的条目不许被搬走；G——`reflectRound` 等 LLM 的窗口里挂上新一批注入；H——`whenIdle` 期间跨过一个完整回合边界；P2-f——没有 `settleUsage` 实现时守卫不生效但必须留痕、账本原样留着、复盘照常跑；P2-i——守卫日志按 agent 去重，同一份账本连来三个空闲边沿只打一条）；tests/recap-pipeline.test.mjs 由 16 条增至 **20** 条（+4：有候选分支、0 候选分支、满额腾位三条路径都只搬「没人碰过」的条目；P2-g / P2-h——结算撞上并发归档时误报的「已被删除」不进用户通知）；tests/archive.test.mjs 由 27 条增至 **30** 条（+3：`scanArchives` / `commitArchives` / `commitOps` 满额腾位三条路径收到 `pendingIds` 都跳过待结算条目）。**本轮没有改写任何既有用例**（只新增）。**基线演进接着上一段**：458 → 470（469 通过 + 1 skip），测试文件数仍是 26。
+
+**第 28 轮「注入从改写系统提示改成追加式 user 消息（前缀缓存友好）」净增 13 条 / 全量 485 条（484 通过 + 1 skip）**：新增 tests/inject-delivery.test.mjs 13 条（六条行为契约 a–f + 边界，见下表），tests/prompt-section.test.mjs 由 14 条改为 **12** 条（删掉 4 条钉住旧行为的用例——注入块与原提示共存、injection 回调抛错退回、injection 返回畸形对象、logger 抛错——以及 1 条 C4.4 inboxCount 动态句用例，新增 3 条「section 文本与运行状态无关」的用例），tests/injection-flow.test.mjs 由 8 条增至 **9** 条（+1：take 之后没 note → 账本不留幽灵注入），tests/client-stats.test.mjs 仍 20 条（3 条改写 + 3 条新增断言）、tests/client-entries.test.mjs 只同步字典键、tests/stats.test.mjs 由 12 条增至 **13** 条（+1「统计⑥」：`runtime` 十一键**原样透传**非 0 值，钉住 `normalizeRuntime` 里 `injectedBatches`/`injectedAppended` 的取值映射——这条是变异自证 M14 逼出来的：键名拼错或把两个口径混同，原来 43 条用例一条都不红，因为夹具里没有非 0 值、`count()` 补 0 把映射错误伪装成「本来就是 0」）。**本轮改写既有用例逐条理由**（全部是「行为契约变了」，新断言一律更严格，没有一条改成永真、没有一条 equal 改 ok）：
+- tests/prompt-section.test.mjs「注入块与原提示共存」：section 的入参契约里已经没有 `injection` 回调，旧断言钉的正是被删掉的行为；替换为「有注入 / 无注入两态逐字相同」。
+- 同文件三条 injection 失败安全用例（抛错 / 返回 null·空 text·畸形对象 / logger 抛错）：注入不再经过 section，失败安全搬到 tests/inject-delivery.test.mjs 的 f/f2；旧断言的被测对象已不存在。
+- 同文件「C4.4｜merge-inbox 降级为只读报告」：`inboxCount` 动态句同样是随状态变化的文本、同样改写缓存前缀，已从 section 删除；用例改为断言 section **不含**该句（tests/wiring.test.mjs 有一条同向断言钉住）。
+- tests/wiring.test.mjs「onInboxCount 必须把数字送到系统提示段」：改为「必须落进 merge-inbox（HTTP /inbox 读得到），且系统提示段绝不许因此变化」——原断言反向，覆盖面不减。
+- tests/wiring.test.mjs handlers 事件表：追加 'agent/pre-step'（新增的投递接缝）。
+- tests/e2e.test.mjs injectFor：注入不再从 section 取文本，改为驱动真 `agent/pre-step` 处理器；场景 6 另加一条红线断言「section 文本不含【ACE 自动注入】」。
+- tests/client-stats.test.mjs / tests/client-entries.test.mjs：注入口径从 1 个数拆成 injectedBatches / injectedAppended 两个数（旧 `injected` 删除，不许两套口径并存）。
+语法自检：每个 `lib/*.js` 与 `client.js` 跑 `node --check`。
+
+**第 29 轮「注入消息不进复盘轨迹（自污染防护）」净增 5 条 / 全量 490 条（489 通过 + 1 skip）**：tests/trajectory.test.mjs 由 26 条增至 **31** 条，五条全部**真跑** `renderTrajectory` / `collectTurnTrajectory`（不是源码正则）：
+- 注入消息（`source:{kind:'dsh-ace', form:'injection'}`）整条不进轨迹：正文与条目 id 都不出现，且**不计入 `messageCount`**；
+- 同一条消息**去掉 source** 后照常渲染（过滤只认 `source`，不认正文——防止「按正文关键词过滤」这种脆做法）；
+- 过滤**不许过宽**：`{kind:'dsh-ace', form:'notice'}` / `{kind:'other-plugin', form:'injection'}` / 只有 kind / 只有 form / kind 大小写不同 —— 五种都照常渲染；
+- `collectTurnTrajectory` 从真 `session.deriveMessages()` 取到的注入消息同样被跳过；
+- 畸形 `source`（null / 字符串 / 数字 / 数组 / 数组包对象 / `{kind:42}`）不抛错、也不误伤。
+
+**本轮没有改写任何既有用例**（只新增）。**基线演进接着上一段**：485 → 490（489 通过 + 1 skip），测试文件数仍是 27（本轮没有新增文件）。
+
+**第 30 轮「考察位（probation）复出通道 + decayed 滞留区兜底」净增 21 条 / 全量 511 条（510 通过 + 1 skip）**：新增 tests/probation.test.mjs 13 条（常量契约 + a–k，全部**真跑** `selectInjection` / `rankInjection`，不是源码正则），tests/archive.test.mjs 由 32 条增至 **40** 条（+8 条 decayed 判据）。见下表两行。
+- 考察位要解决的是**闭环缺口**：净分 −1/−2 的条目被 `INJECT_NET_FLOOR = -1` 挡在注入之外，分数就再也没有流入通道，`netScore` 会永久冻在 −1/−2，既不注入也不掉到 −3 被归档 —— 「净分 −1」与「净分 −100」的结局一模一样。考察位给它一条**受控复出通道**（每轮最多 1 条、相关度 ≥ 本轮最高分的 0.6、同一条距上次命中 ≥ 3 天、且只在常规位没挑满 5 条时占位），同进账本、照常加减分。
+- 用例 b 与 b2 成对钉住冷却判据是 `>=` 而不是 `>`（2 天前进不去、恰好 3 天能进）；用例 d 钉住「常规位满 5 条时考察位不占位」（总数永不超过 5）；用例 h 走完 `−2 → −1 → 0 → 回常规位` 的完整闭环；用例 i 钉住考察失败 → `−4` → 下一轮 `low-score` 归档；用例 j 钉住考察位 id 必须进账本（否则复出也拿不到分数，闭环还是断的）；用例 k 钉住子代理不进考察位（沿用 `isMainAgent` 门）。
+- decayed 兜底是**第二条腿**：考察位也可能一直轮不到（相关度够不上）或根本没人查，所以 `netScore <= -1` 且距上次命中满 `ARCHIVE_STALE_DAYS`（90 天）的条目必须能被 `decayed` 收走。边界用例成对：净分恰好 −1 归档、净分 0 即使 100 天没命中也不归档（净分 0 的条目还能正常注入、会自己挣分）；净分 −4 仍按 `low-score`（判据有优先级）；`lastHit` 缺失用 `created` 计龄兜底、两者都非法不归档（绝不误杀）；`pendingIds` 数据约束对 `decayed` 同样生效。
+- 七次变异自证（每次改源码 → 跑 → 写回原文，全部已复原）：去掉冷却判据 → b 红；`>=` 改 `>` → b2 红；相关度门归零 → 常量契约 + c 红；满 5 条也占位 → d 红；删考察位整段 → a/b2/e/f/g/h/i/j/k 九条红；decayed 去掉时间判据 → 「距上次命中 89 天不归档」红；decayed 的净分门放宽到 0 → 8 条红（含 `stale`、`scanArchives`、满额腾位、高水位、`pendingIds`、两条盲区用例）。
+- **本轮没有改写任何既有用例**（只新增）。**基线演进接着上一段**：490 → 511（510 通过 + 1 skip），测试文件数 27 → 28（新增 tests/probation.test.mjs）。
+
+**第 31 轮「agent/error 降级为未观测 + 就地结算 + 三层可复用性闸门 + 重复检测中间档 + 提示词反例」净增 21 条 / 全量 532 条（531 通过 + 1 skip）**：新增 tests/gate.test.mjs 15 条（第一层六型、第二层一正一反、第三层降级与降级后空壳、批量只拒坏候选、中间档三档、闸门计数真跑流水线），tests/recap-usage.test.mjs 由 20 条增至 **25** 条（+5：a 成功回合注入 2 条各 +1 / b 紧接 agent/error 回合不计分但 hits+1 且 lastHit 写当天 / c 之后再来成功回合只给 c 回合的条目 +1 / 两回合之间没有空闲边沿也不许合并结算 / 连续两次 provider 抽风不把好条目打出局），tests/stats.test.mjs 由 11 条增至 **13** 条（+2：unobserved 与 gateRejected 原样透传、空态补 0），tests/client-stats.test.mjs 与 tests/client-entries.test.mjs 随文案与格子数同步。
+- **本轮唯一被改写的既有用例**是 tests/trigger.test.mjs 的「强失败优先」一条与两条同族断言（classifyTurnOutcome({calls:10,errors:0,error:true}).tier 从 strong 改判 unobserved、outcome 从「失败」改判「未观测」），以及 tests/recap.test.mjs:684/:708 两条同步期望：它们钉的正是被本轮否掉的行为（把 agent/error 当失败证据），属「缺陷被钉成期望」的例外，逐条理由见报告第 31 节。同时**新增**一条「工具报错占比也超标时 weak 优先于未观测」钉住判据顺序。
+- tests/e2e.test.mjs:626-630 的 runtime 键白名单由 12 键同步为 14 键（任务五第 3 条必然要求；断言仍是键集合 deepEqual 全等，没有放宽）。
+- **基线演进接着上一段**：511 → 532（531 通过 + 1 skip），测试文件数 28 → 29（新增 tests/gate.test.mjs）。
+
+**第 32 轮「闸门三处误杀修正（只动 lib/gate.js 的判据）」净增 4 条 / 全量 536 条（535 通过 + 1 skip）**：tests/gate.test.mjs 由 15 条增至 **19** 条（+4：48 码点真实长标题必须放行 + 61 码点必须拒 + 刚好 60 码点放行 / 指代词只在括号里出现必须放行且落盘原文不变 + 半角括号同样剥 / 括号未闭合保守按原判据拒 / 路径整体替换含盘符碎片、相对路径、`文件:行号` 优先级不被抢、`ratio:0.4` 不误吃）。**判据数值只动了 `GATE_TITLE_MAX` 40 → 60**（真实手册最长 48，41–48 的 4 条全是好经验被误杀）；其余判据数值（`INJECT_NET_FLOOR`/`ARCHIVE_LOW_SCORE`/`ARCHIVE_STALE_DAYS`/`PROBATION_*`/`SUPPLEMENT_RATIO`/`BREVITY_MAX_SHRINK_RATIO`）一字未动。
+- 既有用例只改了一处文字：原「标题过长（多于 40 码点）」的用例名与断言消息里的硬编码「40」改成按 `GATE_TITLE_MAX` 插值（用例逻辑本来就用常量构造，判定没变）。
+- 真实手册只读回放（40 条活跃）：**改前 accept 35 / degrade 11 / 拦下 5（title-too-long 4 + pronoun-condition 1）→ 改后 accept 40 / degrade 13 / 拦下 0**。
+- **基线演进接着上一段**：532 → 536（535 通过 + 1 skip），测试文件数 29 不变。
+
+**第 33 轮「拆除正负评分 → 最少使用淘汰」净减 78 条 / 全量 458 条（457 通过 + 1 skip）**：把「正负评分 + 回合成败判定 + 计分时序结算 + 考察位/出局线 + 归档三判据 + 三层闸门」六层整段拆掉，换成「hits 命中计数 + 最少使用淘汰 + LLM 合并 + 归档独立文件 + 毫秒时间戳」。测试侧的动作是**删旧（用户 Q19 已授权）＋ 补等价强度的新用例**，没有一条被改成永真、没有一条标 skip：
+- 整份删：tests/gate.test.mjs（19 条）、tests/probation.test.mjs（13 条）；
+- 整份重写：tests/recap-usage.test.mjs → 12 条（命中账本 + 回合边界一次原子写盘 + 毫秒时间戳三组）；
+- 整份新增：tests/prompts.test.mjs → 5 条（`REFLECTOR_SYSTEM` 四段式、BM25 召回段、输出契约不变）；
+- 扩写：tests/merge.test.mjs 10 → 17 条（`MERGE_SYSTEM` 四段式与反例、`parseMergeResult` 七种输入、`survivingEntry`、`planMerges` 永不抛错、`findMergePairs`）。
+- 新判据用例（下表标「第 33 轮」的那些）：a 注入投递 +1 且同一批不重复计数、b 只有带 query/id 的定向检索 +1（整本读取不计数）、c 满额先合并、d 合并失败跳过/全失败直接淘汰且落盘照常成功、e 淘汰顺序（hits → created → id）、f 淘汰进 archive.md 且腾位、g 手册里永不出现 `## 归档区`、h 整本读取不含归档条目、i 毫秒时间戳写入→读回→排序，j 空标题拒绝/非空放行，k 注入排序纯 BM25。
+- **三条守护用例（用户点名）**：①「同 hits 时老条目先走」（tests/archive.test.mjs，`compareForEviction` 三级顺序）；②「LLM 合并失败绝不许阻塞落盘」（tests/recap-pipeline.test.mjs）；③「毫秒时间戳跨进程仍能正确排序」（tests/recap-usage.test.mjs，两个独立子进程各算一遍）。
+- **变异自证十二条**（每条都真跑、跑完即复原）：M1 注入排序键加回 hits 优先 → k 红；M2 `compareForEviction` 删 created 判据 → 守护① + i + 守护③ 红；M2b 同 hits 改 id 降序 → e 红；M3 只拆外层 try/catch → 全绿（内层兜底），内外两层一起拆 → 守护② 红；M4 时间戳去掉毫秒 → 9 条红；M5 时间戳比较截到日 → i 与守护③ 红；M6 检索计数门改成恒真/恒假 → b 红；M7 手册与归档合成一次写 → 8 条红；M8 标题判据改成恒假 / 加回长度上限 → j 红；M9 `delivered` 去重失效 → a 三条红；M10 合并改成保留更晚那条 → c 等三条红；M11/M12 提示词删掉 BM25 段与反例 → prompts 两条红。
+
+## 桩宿主包真 import lib/index.js：为什么、桩哪几个、怎么驱动事件流
+
+**结论：`lib/index.js` 是服务半边，顶层 import 宿主包，本仓库没有 `node_modules`，所以「真跑一遍接线」只能靠 `node:module` 的 `registerHooks` 把宿主包换成内存桩，再真调一次 `apply(ctx, config)`。**
+
+为什么不能只写源码级断言：源码正则能钉住「某行调了某个函数」，钉不住「这个函数真的有定义」。P0-7 就是这么漏过去的——`noteArchived`/`noteWritten` 在 lib/index.js 里**只有引用、零定义**，`node --check` 查不出，420 条源码级用例全绿，而真实会话里每次复盘都在落盘之后抛 `ReferenceError: noteArchived is not defined`，导致计分与命中永不执行、`recapStats` 永不累加。要抓这一类缺陷，必须让模块**真的被加载、真的被调用**。
+
+桩哪几个包（`tests/wiring.test.mjs` 与 `tests/e2e.test.mjs` 各自建桩，互不依赖）：
+
+| 宿主包 | 桩的形态 | 为什么可以这么桩 |
+| --- | --- | --- |
+| `@deepseek-ai/schemastery` | `z.string()/boolean()/number()/object()` 各返回一个带 `description/default/optional` 的 builder | 插件只在 `Config` 声明处用它，运行期不再调用；桩只要能让 `Config` 建出来即可 |
+| `@deepseek-ai/dsh-tools` | `defineTool(def)` 原样返回 `def`（wiring 版另做 name/execute 校验） | 插件拿到的是「工具定义对象」，真实宿主也只是注册它；桩返回原对象就能拿到 `.execute` 真调 |
+| `@deepseek-ai/dsh-llm` | `createUserMessage(input)` 补成 `{role:'user', id, content:[...], source}`（wiring 版保留 `input.source`、e2e 版用 `{...input, role:'user', id}`） | 只影响通知消息与注入消息的构造，不影响被测逻辑；保留 `source` 是为了断言注入消息的 `{kind:'dsh-ace', form:'injection'}` 标记 |
+
+桩用 `registerHooks({ resolve })` 拦 specifier：以 `@deepseek-ai/` 开头且桩目录里存在同名 `index.js` 时 `shortCircuit` 返回文件 URL，其余 specifier 原样交给 `nextResolve`。**桩必须在 `import(lib/index.js)` 之前装好**，且 `process.env.DSH_HOME` / `DSH_PROFILE_DIR` 也要在 import 之前指向临时目录——`apply()` 里的 `migrateSettingsFile` 会读这两个环境变量，晚一步就会去碰用户真实设置。
+
+怎么驱动事件流（e2e 的做法，也是将来加接线用例的模板）：
+
+1. 建假 ctx：`logger`（info/warn/error 收进数组）、`tools.register`、`systemPrompt.section`（把 spec 存下来，断言时直接调 `spec.text({ agent })`）、`on(event, handler)`（按事件名存表）、`commands.register`、`get(name)`（`profileContext` 给临时目录，其余 undefined）、`llm.stream`（async generator，按轮次吐预置 JSON）、`workingDirectory.ensure`、`inject(deps, cb)`（存下 cb 并立即以假 scoped 调它）；
+2. `apply(ctx, config)` → 从 `record.handlers` 里按事件名取出真正的处理器；
+3. 按宿主的真实顺序发事件：`tools/result`（`{name:'write', agent}` + `{isError:false}`）→ `agent/turn-stopping`（`{agent, turn}`）→ `agent/status`（`{agent, status:'idle'}`）；
+4. **`agent/status` 之后必须 `await` 几个事件循环 tick**：lib/index.js 这里是 `void recapController.onStatus(payload)`（空闲边沿不能阻塞宿主），不 await，急着断言会读到执行到一半的状态；
+5. 断言一律读**真实写出来的临时手册文件**（`readFileSync(path.join(dir,'playbook.md'))`），不读内存里的返回值——只有落盘结果能证明「整条链路真的跑到了 writeFileAtomic」。
+
+假 agent 的最小表面：`session{ header:{origin:'cli'}, requestHeader:()=>({config:{provider,model}}), deriveMessages:()=>[...] }`、`options{provider,model}`、`runMaintenance(fn)`（idle 时 `await fn(signal)`，running 时抛 `already has active work`）、`whenIdle()`、`followup()`。**`deriveMessages()` 必须返回非空**，否则 `runRecap` 走「没有可用的轨迹」分支直接 `{skipped:true}`、根本不调 LLM。
 **既有用例只换期望值、未放宽也未删除任何断言**（逐条理由统一：旧期望值钉的正是「额度蒸发」这个缺陷行为本身，`ownsPending` 判「不归我」之后的正确结果是过继而不是丢弃）：
 
 - tests/trigger.test.mjs `:184` 起「abandonPendingRecap: await 窗口内挂上新待办时…」：`pending.mutCount` 1 → 3（过继 2 次）、`prevLastRecapTurn` 5 → 0（abandon 这一路把冷却一并过继并取更早者）；`st.mutCount === 0` 的断言保留（过继给的是队列里那份，不许同时再还回状态）。
@@ -40,7 +120,7 @@ npm test
 
 ## 用例总表
 
-**结论：覆盖持久化层的解析、序列化、增量操作、并发与原子写；LLM 相关与工具注册不在单测范围（见「未验证清单」）。**
+**结论：覆盖持久化层（含归档独立文件）的解析、序列化、增量操作、并发与原子写，以及注入排序、候选判定、最少使用淘汰、LLM 合并与命中计数；LLM 真实产出与工具注册不在单测范围（见「未验证清单」）。**
 
 并发相关用例分两层：进程内的锁与冲突判定在 tests/playbook.test.mjs（纯逻辑），**真实多进程**在 tests/concurrency.test.mjs —— 两个 node 子进程同时操作同一本手册，跑的是生产同款路径（lib/commit.js 的 `commitOps`），子进程脚本写在系统临时目录、用完即删，仓库里不留脚本。
 
@@ -74,7 +154,7 @@ npm test
 | T26 | buildCatalog | 单个 provider 的 listModels 抛错 → 它自己 `models:[]` 且带 `error`，接口仍 `ok:true` | — | 同上 |
 | T27 | buildCatalog | listModels 卡住 → 按超时收尾（默认 15s，测试注入 30ms），不拖垮接口 | — | 同上 |
 | T28 | buildCatalog | listProviders 抛错 / llm 服务缺失 → 返回 `ok:false` 而不抛异常 | — | 同上 |
-| T29 | withTimeout | 正常值按时返回；超时与内部拒绝都以 Error 拒绝 | — | 同上 |
+| T29 | withTimeout | 正常值按时返回；超时与内部拒绝都以 Error 拒绝；**超时不 abort 上游**（宿主 `listModels` 没有 `signal`），上游晚到的 reject 被吞掉、不许变成 unhandledRejection | — | 同上 |
 | T30 | ModelPicker（client.js） | 两个下拉以占位「跟随会话模型」渲染，两项都空时无「只填一项」警告 | — | tests/client-picker.test.mjs |
 | T31 | ModelPicker | 展开后可搜索（大小写不敏感子串）、选中 provider 即 POST `reflectProvider` | — | 同上 |
 | T32 | ModelPicker | model 下拉按 provider 分组，已选 provider 时只列该组 | — | 同上 |
@@ -180,8 +260,8 @@ npm test
 | T132 | AceSection | 打开页面拉 1 次；点「刷新」变 2 次；保存设置成功后变 3 次 | I4 | 同上 |
 | T133 | collectEntries | 空手册 / 只有文档头 / 全文传空串 → `ok:true`、entries 空、total 0、maxEntries 透传，不抛错 | I4 | tests/entries.test.mjs |
 | T134 | collectEntries | 正常手册返回全部条目（顺序与手册一致），`auto` 恒为布尔（无 auto=true 的条目是 false 而非 undefined） | I4 | 同上 |
-| T135 | toEntry / collectEntries | 字段映射：正文取条目字段、created/updated/helpful/harmful 取 meta；每条 entry 的字段集合与**顺序**固定为 `id,title,condition,action,rationale,auto,created,updated,helpful,harmful`，且 id/正文/日期为 string、auto 为 boolean、helpful/harmful 为 number | I4 | 同上 |
-| T136 | toEntry | 缺字段的条目给空串/0/false；`toEntry({})` 稳定；元数据里 helpful 写成非数字回落 0（与 parseMeta 的 `Number(v) \|\| 0` 同口径） | I4 | 同上 |
+| T135 | toEntry / collectEntries | 字段映射：正文取条目字段、created/updated/hits/lastHit 取 meta；每条 entry 的字段集合与**顺序**固定为 `id,title,condition,action,rationale,auto,created,updated,hits,lastHit`，且 id/正文/三个时间字段为 string、auto 为 boolean、hits 为 number。**第 33 轮**：`helpful` / `harmful` 已从 meta 与接口里整层删除，不再出现在任何返回体里 | I4 | 同上 |
+| T136 | toEntry | 缺字段的条目给空串/0/false；`toEntry({})` 稳定；元数据里 `hits` 写成非数字回落 0（与 `parseMeta` 的 `Number(v) || 0` 同口径）、三个时间字段缺失回落空串（旧手册只写日期的条目照常解析） | I4 | 同上 |
 | T137 | readPlaybookEntries | 文件不存在 → `ok:true` + reason `missing`（不抛 ENOENT），entries 空、total 0 | I4 | 同上 |
 | T138 | readPlaybookEntries | 路径是目录（读不成文件）→ reason `unreadable`，不抛错 | I4 | 同上 |
 | T139 | collectPlaybookEntries | 相对 playbookPath 在无会话上下文时 → reason `needs-session`、pathKind `relative`、回显原路径，不抛错 | I4 | 同上 |
@@ -278,6 +358,124 @@ npm test
 | T230 | 过继「先搬移、后记账」（H3） | 队列里那份待办的字段被 `Object.freeze`、或它的 `mutCount` 是只读 getter 时，搬移这一步会抛错：此时 `ADOPTED_PENDINGS` 不许已经记上（否则额度一次都没搬成、这份待办却被永久封账，额度永久蒸发）；换一份可写的同值待办之后，同一条路径必须仍能正常过继（额度确实搬进去、warn 里没有「过继过一次」） | I9 | tests/trigger.test.mjs |
 | T231 | 结算夹取口径与过继/记账统一（H4） | `pending.mutCount = -4`、`st.mutCount = 10` 时，`restorePendingMutCount` 与 `abandonPendingRecap` 结算后 `st.mutCount` 仍是 10——改动前 `Number(...)` 只挡 `NaN`/`Infinity`，负数有限值会被原样收下，把状态往回拽成 6 | I9 | 同上 |
 
+| T232 | 注入投递 → hits +1（第 33 轮，a） | 真跑 `agent/pre-step` 把注入消息追加进历史 → 回合边界 `takeHitIds` + `flushHits` 一次原子写盘；盘上这 2 条 `hits` 各 +1、`lastHit` 是毫秒戳、元数据行里**没有** `helpful` / `harmful` | I11 | tests/injection-flow.test.mjs |
+| T233 | 同一批注入重复装配不重复计数（第 33 轮，a2） | 连跑三次 pre-step：只有第一次追加消息、`injectedAppended` 只 +1、账本里仍是同一批 id；再走一次回合边界，`hits` 只 +1 一次（`delivered` WeakMap 认领语义） | I11 | tests/inject-delivery.test.mjs / tests/injection-flow.test.mjs |
+| T234 | 检索命中（第 33 轮，b） | `ace_playbook` 整本读取：`hits` 与 `retrievalHits` 都不动；带 `query` 定向查找：命中的条目 `hits` +1 且 `retrievalHits` 加同样的数；带 `id` 查找：再 +1；`lastHit` 是毫秒戳且日期部分等于当天 | I11 | tests/wiring.test.mjs |
+| T235 | 满额先合并（第 33 轮，c） | `maxEntries` 已满时先走 `planMerges`：LLM 合成一条同构四字段条目、**保留 `created` 更早那条的 id**、另一条搬进 `archive.md` 且 `reason=merged`；合并后活跃条数 ≤ 上限、手册里没有 `## 归档区` | I12 | tests/recap-pipeline.test.mjs / tests/e2e.test.mjs（场景 5b） |
+| T236 | 合并失败绝不许阻塞落盘（第 33 轮，d，守护②） | LLM 抛错 → 该对被摘掉换下一对；全部失败 → 跳过合并直接按 `planEvictions` 淘汰腾位，**这一批复盘照常成功**（候选一条不丢、`recapStats` 不记失败）；输出过不了 `extractJsonObject` 或四字段任一不合格同样按该对失败处理 | I12 | tests/recap-pipeline.test.mjs |
+| T237 | 淘汰顺序（第 33 轮，e，守护①） | `compareForEviction` 三级判据：`hits` 升序 → `created` 更早先走（同 hits 时 5 条夹具的三条编号顺序与创建顺序故意相反，断言排序结果就是「老的先走」而不是按编号）→ 同 hits 且同 created 时按 `idNumber` 数字升序（不是字典序、不是随机） | I12 | tests/archive.test.mjs |
+| T238 | 淘汰进独立归档文件并腾位（第 33 轮，f） | 满额（含 0 候选回合的 `commitCapacity` 路径）→ `hits` 最少的条目搬进 `archive.md` 且带 `- 归档：reason=evicted date=…`、活跃区腾位、新条目正常落盘；**先写归档文件再写手册**（顺序反过来一旦手册写失败就等于物理删除）；两个子进程同时带淘汰钩子写，被淘汰的条目在归档里一条不丢也不重复 | I12 | tests/archive.test.mjs / tests/concurrency.test.mjs / tests/recap-pipeline.test.mjs |
+| T239 | 手册里永不出现 `## 归档区`（第 33 轮，g） | `parseEntryDocument` 不认这个章节、`serializePlaybook` 不写它：旧手册里残留的 `## 归档区` 在写回时被清掉、其下条目按普通块被识别；归档文件与手册同构（同款条目块 + 元数据行 + 一行归档说明），写入走 `withExclusiveLock` + `writeFileAtomic`、不留残渣 | I13 | tests/archive.test.mjs |
+| T240 | 整本读取不含归档条目（第 33 轮，h） | `ace_playbook` 整本读取拿到的正文里没有归档条目、也没有 `## 归档区`，且一次都不计命中；归档条目只在 `GET /api/dsh-ace/entries` 的 `archived` 分区与 `archive.md` 里可见 | I13 | tests/e2e.test.mjs / tests/wiring.test.mjs |
+| T241 | 毫秒时间戳（第 33 轮，i，守护③） | 写入 → 读回 → 排序正确（同 hits 下按毫秒戳排，同毫秒按 id 兜底）；旧格式（只有 `YYYY-MM-DD`）照常解析、不抛错、排在同样日期更早的位置；**跨进程**：两个完全独立的子进程各读同一本手册各算一遍排序，结论必须一致（守护③） | I14 | tests/recap-usage.test.mjs |
+| T242 | 候选过滤只剩「标题非空」（第 33 轮，j） | 空标题（空串 / 纯空格 / 换行制表）拒绝且不落盘；非空一律放行——**不再有长度上限、不再有指代词规则、不再有文件名规则**（48 码点长标题、正文含 `C:\work\a.md`、condition 里带「本次」都照常落盘） | I15 | tests/recap-pipeline.test.mjs |
+| T243 | 注入排序键 = 纯 BM25（第 33 轮，k） | `rankInjection` 只按相关度排、同分按 `idNumber` 数字升序、行里不再有净分项；**`hits` 高低不影响排序**：`hits=999` 的零字面交集条目不进注入、正文逐字相同的三条按 id 排而不是按 hits 排（防自增强棘轮） | I14 | tests/inject.test.mjs |
+| T244 | `MERGE_SYSTEM` 与 `planMerges`（第 33 轮） | 提示词四段式（目标 / 只做什么 / 不做什么含反例 / 输出契约必须是 JSON）；`parseMergeResult` 七种输入（合法四字段 / 缺字段 / 空串 / 非 JSON / 数组 / 嵌套错位 / 代码围栏包裹）；`planMerges` 最多 5 轮、每轮一对、**永不抛错** | I12 | tests/merge.test.mjs |
+
+**第 34 轮「审查 report33 的 5 条必修 + 6 条建议修」净增 13 条 / 全量 471 条（470 通过 + 1 skip）**：本轮**没有整份删文件**，改的是「同一批用例从假断言换成真行为断言」+ 补盲区。逐文件：tests/archive.test.mjs 21 → **29**（+7 行为用例：h1/h2/h4/h5/i1/i2 与 h3，外加既有 C4.3 那条假断言改写成真断言）、tests/recap-usage.test.mjs 12 → **14**（+2：退回账本的命中与下一批新命中合并成一次写盘、没有 `noteHitIds` 可退时明说已丢失）、tests/client-stats.test.mjs 20 → **21**（+1：统计块日期格对空值/垃圾值给「—」）、tests/client-entries.test.mjs 24 → **26**（+2：毫秒戳经 client 渲染成 10 字符日期、日期格兼容旧格式/空值/垃圾值）。
+- **必修补的是零用例的盲区，不是行为**：归档写失败被吞掉（审查变异 M5/N11）在旧套件里**458 条全绿**，因为没有任何一条用例把 `archive.md` 造成不可写。现在 `archive.md` 用 `fs.mkdir` 造成目录，`appendArchivedEntries` 必抛 `EISDIR`，于是同时钉住三件事：①`commitOps` / `commitCapacity` 都**抛错**；②手册**字节完全未变**（`Buffer.equals`，不是只数条数）；③归档里**没有**新条目、被淘汰的条目**没有蒸发**。
+- **锁内顺序（先归档、后手册）用可观测量钉住**：h3 的手册**故意不写 `<!-- ace:id-highwater: N -->` 标记行**（先断言 `readIdHighWater(snapshot) === 0`），归档不可写时手册必须**字节不变且高水位仍为 0**；两行对调后 `writeFileAtomic` 先写、手册会被写成高水位 4 再抛错 → 变红。**没有用源码正则**。
+- **高水位补了「归档原文」这一路**：`maxArchivedIdNumber` 不再只遍历 `parseArchiveFile` 的结果，而是逐行扫归档原文，只对 `^\s*###` 标题行取 `/\[?ace-(\d+)\]?/`（正文里偶然出现的 `ace-999` 不算）。理由：`HEADING_RE`（lib/entry-format.js:23）要求标题非空，旧格式 `### ace-500` 与空标题 `### [ace-888]` 解析不出来，但编号确实被用掉了 —— 人工手写归档就能触发编号复用。h4 的归档里同时放了这两种形状 + 一个正文里出现的 `ace-999`，断言 `parseArchiveFile` 只认出 `['ace-778','ace-601']`、`maxArchivedIdNumber(原文) === 778`。
+- **建议修 6 的兜底是确定性的**：`evictPlan` 抛错时按 `compareForEviction` 全序排序取前 N 条（i1 断言兜底结果与 `planEvictions` 逐条相同，不是随便挑）。i2 覆盖「返回不可用值」（`() => undefined`）这一支。
+- **建议修 7 把假承诺改成真重试**：写盘失败时把这批 id 借 `noteHitIds`（= `lib/ledger.js` 的 `note`）退回账本，下个回合边界取走的是**退回的那批 + 本回合新命中**的合并结果，一次写盘。
+- **三处假断言已改写（指名范围内）**：tests/archive.test.mjs 的「C4.3｜dayString 现在是毫秒时间戳」原来自己 `slice(0,10)` 再断言等于 `'2026-10-24'`（slice 是测试做的，client 从来没截过）；tests/client-stats.test.mjs:713 原来只用源码正则断言「client.js 里出现 injectedSkipped/injectedFailed 两个字段名」（钉住的正是一格假 0）；tests/recap-usage.test.mjs:245 原来把「下个回合边界再记」这句没实现的承诺钉成契约。
+- **变异自证十一条**（每条都真跑、跑完逐字复原）：MA 归档写被 try/catch 吞（commitOps）→ h1/h3 红（2 条）；MB 同源（commitCapacity）→ h2 红；MC 两行对调（先手册后归档）→ h1/h3 红（手册先被写坏）；MD 高水位去掉 `maxArchivedIdNumber` → h4 红；MF 高水位只留 `readIdHighWater + maxEntryIdNumber(baseEntries)` → f/h4/h5/i1/i2 红（5 条）；MG 删掉淘汰兜底 → i1/i2 红；M7 删掉「退回账本」→ 两条 recap-usage 用例红；M-D1/M-D2（界面日期截断改恒等 / 恒返回「—」）→ 分别红 4 条 / 6 条；必修 5 把两格假 0 加回去 → 红 1 条。**唯一全绿的是 ME**（把高水位计算挪到淘汰之前）：它是**等价变异**——四项输入一个没变（`baseEntries` 被移走的条目仍留在 `parsed.entries` 里，由 `maxEntryIdNumber(parsed.entries || [])` 兜住），所以输出必然相同；要钉住「淘汰后重算」必须削弱淘汰前的编号来源，也就是 MF。
+- **基线演进接着上一段**：458 → 471（470 通过 + 1 skip），测试文件数 28 不变。语法自检：`lib` 下 29 个 `.js` + `client.js` 逐个 `node --check`，0 错。
+
+**第 35 轮「设置页两个数字项的 0 语义」净增 6 条 / 全量 477 条（476 通过 + 1 skip）**：修的是「文案承诺 0 表示不冷却 / 每次都触发，代码却用 `Number(x) || 默认值` 把显式 0 兜成默认值」。
+- **生产改动只有一处文件两行**：`lib/trigger.js` 新增私有函数 `numberOrDefault(value, fallback)`（:94-122），`shouldTriggerAutoRecap` 里的 `const threshold = Number(config.autoRecapThreshold) || 1;`（原 :104）与 `const cooldown = Number(config.autoRecapCooldownTurns) || 2;`（原 :108）改为 `numberOrDefault(config.autoRecapThreshold, 1)`（:135）与 `numberOrDefault(config.autoRecapCooldownTurns, 2)`（:140）。其余判据（`config.autoRecap === false` 直接 false、`mutCount < threshold`、`currentTurn - lastRecapTurn < cooldown` 的 `<` 边界）一字未动。
+- **取值取舍（契约，已写进 `numberOrDefault` 的 JSDoc）**：`undefined` / 键不存在 → 回落默认值；**`null`、空串、纯空白串同样回落**——`Number(null)` 与 `Number('')` 都是 0，照收会把「设置页把输入框清空」读成「用户要求最激进配置」（cooldown 0 = 每回合都复盘、threshold 0 = 空回合也复盘），代价是整晚白跑模型调用；要 0 就显式写 0（数字 `0` 与字符串 `'0'` 都算显式）。数字字符串照常按数字收。`NaN` / `Infinity` / 非数字字符串回落。**负数不夹到 0**：设置页 bounds 是 0–1000（`lib/index.js:1242-1243`），负数只可能来自手改配置，负 cooldown 让 `currentTurn - lastRecapTurn < cooldown` 恒 false（等价不冷却）、负 threshold 同理恒过，与改动前语义一致；夹到 0 会在 `lastRecapTurn > currentTurn` 的反常状态下改变行为，为最小改动面保持原样。
+- **tests/trigger.test.mjs 46 → 52（+6，T246–T251）**，全部真跑 `shouldTriggerAutoRecap` / `recordTurnEnd` 真对象、**没有一条源码正则**：cooldown 0 下 `lastRecapTurn === currentTurn`（差 0 轮）仍触发、`9 → 10` 仍触发、字符串 `'0'` 同样算显式；threshold 0 下 `mutCount: 0` 仍触发；缺键（含显式 `undefined`）仍按默认 2 / 1（`mutCount:0` 不触发、`9 → 10` 挡、`8 → 10` 放行）；`null` / `''` / `'   '` / `'\t'` / `NaN` / `Infinity` 逐个按「没配」回落；`recordTurnEnd` 在 cooldown 0 下同一回合号连记两次照挂第二份待办（`pendingSeq 2`、`prevLastRecapTurn 7`）、在 threshold 0 下 `mutCount` 保持 0 也挂待办。
+- **tests/recap.test.mjs 只改注释、断言一条未动**：:178-180 原注释把「显式配 0 也等价于 2」当事实写（现在 0 真的不冷却，且本文件 `makeController` 默认就是 `autoRecapCooldownTurns: 0`）；:443-444 原注释说「cooldown 显式配 0，但实际等价 2」，而该用例的 `getConfig` 早就传的是 `autoRecapCooldownTurns: 2`，注释与代码不符，已改成「这里显式配 2（= 默认值），5 → 6 被挡、5 → 7 放行」。**改动前跑过一次全量：现有 471 条一条都没依赖 0 回退**，所以没有用例是靠旧回退才通过的。
+- **变异自证**：把两处 `numberOrDefault(...)` 逐字改回 `Number(...) || 1` / `|| 2`（其余不动）→ `tests 477 / pass 472 / fail 4`，**精确红 4 条、没有连带红**，红的正是新增的四条 0 语义用例：`shouldTriggerAutoRecap: cooldown 显式配 0 = 不冷却（lastRecapTurn === currentTurn 也触发）`、`shouldTriggerAutoRecap: threshold 显式配 0 = 每次都触发（mutCount 0 也触发）`、`recordTurnEnd: cooldown 显式配 0 → 同一回合号再记一次也照样挂待办`、`recordTurnEnd: threshold 显式配 0 → 本回合一次都没动手也挂待办`。跑完立刻按字节写回原样（sha256 与变异前逐字相同）。另两条新增用例（缺键回落、null/'' 回落）在旧写法下**仍然通过**，这正是它们该有的表现——它们钉的是「缺失才回落」，旧写法在缺失时行为恰好相同。
+- **语法自检**：`lib` 下 29 个 `.js` + `client.js` 共 30 个文件逐个 `node --check`，**bad = 0**。
+- **基线演进**：471 → 477（476 通过 + 1 skip），测试文件数 28 不变。
+- **生效时机**：`lib/trigger.js` 是服务半边，改动**要重启宿主才生效**；已在运行的会话里设置页仍按旧代码判定，重启后填 0 才真的表示「不冷却 / 每次都触发」。
+
+**第 36 轮「话题热度 + 新条目保护期 + 三个预算配置项」净增 39 条 / 全量 516 条（515 通过 + 1 skip）**：生产面 = 新模块 `lib/heat.js` + `lib/inject.js` 排序键（0.9 × 归一化相关度 + 0.1 × 归一化话题热度）+ `lib/evict.js` 的 `protectDays` + `lib/index.js` 的接线与三个配置项（`evictProtectDays` 14 / `injectTokenBudget` 900 / `injectMaxEntries` 5）+ `client.js` 的三个 number 字段。
+- **新增 5 个测试文件（39 条）**：tests/heat.test.mjs **14**、tests/heat-wiring.test.mjs **2**、tests/evict-protect.test.mjs **10**、tests/config.test.mjs **9**、tests/tuning-behaviors.test.mjs **4**（逐条覆盖见文末新增表）。**没有一条源码正则**，全部真跑生产函数（含真 HTTP 路由与真事件流）。
+- **既有用例改了三处（契约变化，断言没有放宽）**：tests/wiring.test.mjs:391-394 的 Config 字段数 9 → 12；tests/entries.test.mjs 条目⑧ 改成 `/defaults: \{[\s\S]*?maxEntries: DEFAULT_MAX_ENTRIES/`（`bounds.defaults` 现在有四个键）并保留「不许写死数字」的反向断言；tests/e2e.test.mjs 场景 5 的 `makeHost` 加 `config: { evictProtectDays: 0 }`（该场景故意让条目只有 10 天龄，默认 14 天保护会把旧期望顶掉）。
+- **顺手修掉一个真实缺陷**：`normalizeSettings` 读设置文件时对三个新键原用 `validInt`，而 `Number(null) === 0`、`Number('  ') === 0` —— 被手改坏 / 旧版本写下的 `evictProtectDays: null` 会被静默读成「0 = 不保护新条目」。新增 `validTunableInt`（null / 空白串 → undefined → 回落默认值），显式 0 仍保留。
+- **设置写入只认 POST**（`lib/index.js` 的 `if (method !== 'POST') return send(405, { error: 'method not allowed' })`）：tests/config.test.mjs 按真实契约发 POST，没有为了让用例好写去改生产语义。
+- **变异自证与语法自检**：变异表见 FIX-REPORT-R36.md（改了哪一行 → 哪条用例变红，无落空项）；`lib` 下每个 `.js` + `client.js` 逐个 `node --check`，bad = 0。
+- **基线演进**：477 → 516（515 通过 + 1 skip），测试文件数 28 → 33。
+
+**第 37 轮「不满额轻量合并 + 注入首行文案跟随配置 + 只读体检脚本」净增 30 条 / 全量 546 条（545 通过 + 1 skip）**：生产面 = `lib/merge-llm.js` 的两个新常量（`MERGE_EAGER_THRESHOLD_RATIO = 0.75` / `MERGE_EAGER_MAX_ROUNDS = 2`）+ `lib/recap-pipeline.js` 的 `else if (adds > 0)` 轻量合并分支 + `lib/inject.js` 的 `renderInjection(picked, { withRationale, maxEntries })` 与 `selectInjection` 三处透传 + 新脚本 `tools/diagnose.mjs`。
+- **新增 1 个测试文件（24 条）**：tests/diagnose.test.mjs **24**（逐条覆盖见文末新增表）。**没有一条源码正则**钉行为——唯一例外是 A10 的反向接线检查，它钉的是「`lib/` 与 `client.js` 不许 import `tools/`」这条结构约束，属于本来就只能看源码的那一类。
+- **既有用例改了三处（契约变化，断言只加不放宽）**：tests/inject.test.mjs 的 C5.5 补一条「首行回落 `INJECT_MAX_ENTRIES`」断言、新增 C5.6（17 → 18 条）；tests/recap-pipeline.test.mjs 新增 5 条 `e｜` 用例（12 → 17 条）；tests/tuning-behaviors.test.mjs 配置行为② 尾补 3 条端到端断言（`injectMaxEntries: 8` → 首行「最多 8 条」且绝不出现「最多 5 条」），文件条数不变。tests/e2e.test.mjs 场景 6 的 `/最多 5 条/` 断言**没有改**——它跑的是默认配置，5 就是真话。
+- **变异自证与语法自检**：10 个变异（本文件每条任务至少 1 个）全部验证「改坏生产代码 → 只有对应用例变红 → 改回全绿」，明细见 FIX-REPORT-R37.md 的变异表；`lib` 下 30 个 `.js` + `client.js` + `tools/diagnose.mjs` 逐个 `node --check`，bad = 0。
+- **一条重要教训（A3 变异）**：第一版「正文过短」用例用常量自适应构造样本（`'x'.repeat(SKELETON_BODY_CHARS - …)`），把常量改成 120 时用例**自己跟着变形**照样绿 —— 等于没钉住字面值。补写死长度 79 / 80 / 81 三条之后，同一个变异红 2 条。**凡是「阈值类」用例，样本长度必须写死，不许从被钉的常量推。**
+- **基线演进**：516 → 546（545 通过 + 1 skip），测试文件数 33 → 34。
+
+| T245 | `REFLECTOR_SYSTEM` 四段式（第 33 轮） | 目标段、只做什么段（条件写「当……时」触发式且要求含用户真会说出口的词）、不做什么段（**含反例**）、怎么写才能被召回段（讲清 BM25 吃哪些词面、不认语义）；输出契约 `candidateLine` 的 JSON 形状一字不变 | I15 | tests/prompts.test.mjs |
+| T246 | cooldown 显式配 0 = 不冷却（第 35 轮） | `shouldTriggerAutoRecap` 真模块：`{autoRecapCooldownTurns:0}` + `lastRecapTurn === currentTurn`（差 0 轮）→ `true`；`9 → 10`（差 1 轮，旧实现被挡）→ `true`；字符串 `'0'` 同样算显式 0 → `true` | I9 | tests/trigger.test.mjs |
+| T247 | threshold 显式配 0 = 每次都触发（第 35 轮） | `{autoRecapThreshold:0}` + `mutCount:0`（一次工具都没动）→ `true`；字符串 `'0'` 同样 → `true`。旧实现 `Number(x) || 1` 下两条都是 `false` | I9 | 同上 |
+| T248 | 缺键才回落（第 35 轮） | 配置里**没有**这两个键（或显式 `undefined`）→ 仍按默认 2 / 1：`mutCount:0` 不触发、`9 → 10` 被挡、`8 → 10` 放行、`mutCount:1` 触发 | I9 | 同上 |
+| T249 | null / 空串 / 空白 / 非有限数一律回落（第 35 轮，契约） | `null`、`''`、`'   '`、`'\t'`、`NaN`、`Infinity` 逐个喂进去 → 全部按「没配」回落默认 2 / 1（断言的就是回落后那几条边界行为）。取舍理由：`Number(null)` 与 `Number('')` 都是 0，照收会把「输入框被清空」读成「用户要求最激进配置」；要 0 就显式写 0 | I9 | 同上 |
+| T250 | recordTurnEnd + cooldown 0（第 35 轮） | 同一回合号连记两次（`turn 7` 两遍，中间模拟待办被取走）：第二份待办照挂（`trigger:true`、`pending.turn 7`、`prevLastRecapTurn 7`、`pendingSeq 2`）。旧实现 `7-7=0 < 2` 会被挡下 | I9 | 同上 |
+| T251 | recordTurnEnd + threshold 0（第 35 轮） | 本回合 `mutCount` 保持 0（一次都没动手）也挂待办：`trigger:true`、`pending.mutCount 0`、`pending.turn 5`、`lastRecapTurn 5`。旧实现 `0 < 1` 直接不触发 | I9 | 同上 |
+| T252 | 不满额也配对：只有「真的很像」才动手（第 37 轮） | `runRecapPipeline` 真整链 + 真 `commitOps` + 真 `archive.md`：`maxEntries: 60`（远未满额）、两条正文逐字同的条目 → 仍跑一次轻量合并（`asks.length === 1`、`out.merged === 1`、保留 created 更早那条的 id、`hits` 相加、归档 `reason=merged` + `supersededBy`）。对照组：候选被丢弃使 `adds === 0` → `mergeAsk` **一次都不许调** | I11 | tests/recap-pipeline.test.mjs |
+| T253 | 轻量阈值是 0.75 不是满额的 0.5（第 37 轮） | 造一对对称 BM25 正文比率 **0.505** 的中等相似条目：`findMergePairs` 在 `0.5` 下返回该对、在 `0.75` 下返回空；整链跑完它们**仍是两条**、`merged === 0`。把 `MERGE_EAGER_THRESHOLD_RATIO` 改回 `0.5` → **只有这一条**变红 | I11 | tests/recap-pipeline.test.mjs |
+| T254 | 注入首行「最多 N 条」说真话（第 37 轮） | `selectInjection(entries, q, { maxEntries: 8 })` → `count === 8` 且首行 `最多 8 条`、不含 `最多 5 条`；`maxEntries: 3` 同验；不传回落 `INJECT_MAX_ENTRIES`；直接调 `renderInjection` 传 12 → `最多 12 条`，传 `0` / `'x'` → 回落默认。端到端：`makeHost({ config: { injectTokenBudget: 4000, injectMaxEntries: 8 } })` 真走 `agent/pre-step` 投递，首行必须是「最多 8 条」 | I12 | tests/inject.test.mjs、tests/tuning-behaviors.test.mjs |
+| T255 | 体检脚本真的零写盘（第 37 轮） | 造临时手册 + 归档 + 设置文件，跑完整 `diagnose()` 前后逐文件比对字节与 mtime：**一个字节都不许变**、目录里也不许多出文件（锁文件、tmp 文件都不许留） | — | tests/diagnose.test.mjs |
+| T256 | 体检脚本的阈值不是摆设（第 37 轮） | 「正文过短」用**写死长度** 79 / 80 / 81 三条钉住 `< 80` 这个字面阈值（不许从常量推长度）；「僵尸」用 hits=0 / 59 天 / 恰好 60 天 三条钉住 `>= 60`；「近 30 天」用 30 / 31 / 未来日期三条。把 `SKELETON_BODY_CHARS` 改成 120 → 红 2 条 | — | tests/diagnose.test.mjs |
+
+## 新增测试文件清单与逐文件条数（13 个新增文件 + 第 33/37 轮的重排）
+
+| 文件 | 条数 | 覆盖点 |
+| --- | --- | --- |
+| tests/playbook.test.mjs | 72 | 持久化层：解析（文档头/markers/`extraLines` 保真）、序列化往返、增量操作三态（add/update/remove）、ID 高水位（含归档文件取最大）、容量判定、同进程锁与冲突判定、原子写。**第 33 轮**：`metaLine` 只写四字段 created → updated → hits → lastHit、`parseMeta` 静默丢弃旧的 `helpful` / `harmful`、`parseEntryDocument` 不认 `## 归档区`、毫秒戳往返 |
+| tests/trigger.test.mjs | 52 | 触发判定纯函数 + 调度状态机（`recordTurnEnd` / `takePendingRecap` / `requeuePendingRecap` / `abandonPendingRecap` / `restorePendingMutCount` / `isBusyError` / `ownsPending` / `adoptOrphanPending` 与三本幂等账本）。**第 33 轮**：`classifyTurnOutcome` / `settleTurnOutcome` / `WEAK_FAILURE_*` / `UNOBSERVED_*` / `openBuckets` / `noteToolResult` / `noteAgentError` 与 C2 三档信号整段删除。**第 35 轮 +6（T246–T251）**：设置页文案承诺的「0」语义（cooldown 0 = 不冷却、threshold 0 = 每次都触发）、「只有缺键 / null / 空串 / 非有限数才回落默认 2 / 1」，以及 `recordTurnEnd` 在两种 0 配置下真挂待办 |
+| tests/trajectory.test.mjs | 31 | 轨迹渲染器：渲染顺序与角色前缀、**注入消息整条跳过**（`source.kind==='dsh-ace' && form==='injection'`；去掉 source 后照常渲染、五种只命中一半条件的不误伤）、`maxMessages` 尾部截断、`maxChars` 首尾保留、tool 结果按 id 绑定工具名、退化分支省略数、整条 summary ≤ `maxChars`、畸形输入不抛错；另有源码级断言：零 import、`runRecap` 确实喂轨迹且轨迹为空不调 LLM |
+| tests/archive.test.mjs | 29 | **第 33 轮重写 + 第 34 轮补盲区**：淘汰判据层（`compareForEviction` 三级顺序 = `hits` 升序 → `created` 更早先走 → `idNumber` 数字升序，**守护①**在此；`planEvictions` 产出 `{id, reason:'evicted', date}`）、满额淘汰落盘（f：hits 最少的搬进 `archive.md`、活跃区腾位、新条目正常落盘；`commitCapacity` 的 0 候选腾位路径）、**手册永不出现 `## 归档区`**（g）、`applyArchiveMoves` 只搬不删、`resolveSupersedes`、候选判定里只剩两条正文判据（`shrinksTooMuch` / `bodyLength`）、`decideCandidates` 三分支、归档文件与手册同构且写入不留残渣、并发下淘汰钩子与冲突同批。**第 34 轮新增 7 条（全是行为面，不是源码正则）**：h1/h2「归档不可写（`archive.md` 造成目录 → `EISDIR`）→ 抛错 + 手册字节完全未变 + 归档没有新条目 + 被淘汰条目不蒸发」（`commitOps` / `commitCapacity` 两条路径各一条）；h3「锁内先归档、后手册」的顺序钉子（手册故意不写高水位标记行，归档不可写时高水位必须仍是 0，两行对调就会先写成 4）；h4「归档里的更大编号必须进高水位」（新格式 `### [ace-778]` + 旧格式 `### ace-500` + 正文里出现的 `ace-999` 不算）；h5「满额淘汰 + 同批新增，新编号不得复用刚被淘汰的号」；i1/i2「淘汰计划抛错 / 返回不可用值 → 内置确定性兜底，候选照常落盘、被淘汰条目进归档 reason=evicted、日志含兜底提示」。**另**：C4.3 那条自称「界面展示仍取前 10 位」却自己 `slice(0,10)` 的假断言改写成真断言（毫秒戳本体匹配 `STAMP_RE`、`dayOf` 只到日、跨日 23:30 与次日 00:05 的 `dayOf` 不相等），并注明「界面只到日的真守护在 client 渲染侧」。**删掉的**：三判据 `archiveReasonFor`（low-score / decayed / stale）、`scanArchives`、`pendingIdSet` 及全部边界用例 |
+| tests/inject.test.mjs | 18 | `estimateTokens` 按字符类别加权（非 ASCII 1.0 / ASCII 0.4）、**排序键就是纯 BM25 相关度**（k：分高的排前面、行里不再有净分项）、**`hits` 高低不影响排序**（k2：`hits=999` 也压不过相关度，正文逐字相同的三条按 `idNumber` 排）、0 分条目不进候选、条数上限 5、token 预算 900 的截断、`renderInjection` 首末行文本（已改成「按检索相关度排序」）、`userTextOf` / `messageKeyOf` / `createInjectionCache`。**删掉的**：`INJECT_NET_FLOOR` 出局线、`WEIGHT_RELEVANCE` / `WEIGHT_NET` / `NET_SAT_DIVISOR` 加权键、`probation` 考察位 |
+| tests/injection-flow.test.mjs | 8 | 命中账本接缝：`publish → take（认领）→ note（真追加进历史后才记账）→ 回合边界 take 走 → flushHits 一次原子写盘`；**a** 注入投递后这 2 条 `hits` 各 +1、`lastHit` 刷新；同一批只投递一次（连续 `take` 只有第一次拿到 id）、不同 agent 分账、无命中不记账、`peek` 只读、**子代理绝不进命中账本**。**删掉的**：成功回合 `helpful +1` / 失败回合 `harmful +1` 的分档计分 |
+| tests/inject-delivery.test.mjs | 13 | 注入投递：真 import `inject-delivery.js` + `injection-flow.js` + `inject.js`，唯一假件是宿主的 `createUserMessage`（返回深冻结对象）。**a** 同一批连续 5 次 pre-step 只有第 1 次追加（`injectedAppended` 只 +1）；**a2** 换新消息 key 后照常交付；异常只 warn + `injectedFailed` +1 + 原样返回 decision；`startsRequestSeries` 等字段被 spread 保留 |
+| tests/ledger.test.mjs | 5 | 命中账本 `note` / `peek` / `take` 语义、同 id 去重、按 agent 分账、只收非空字符串、`take` 返回副本 |
+| tests/prompt-section.test.mjs | 12 | 【ACE 操作手册】提示逐字保留（autoRecap / autoReflect 两分支）、两个开关都关返回空串、**section 文本在「有注入 / 无注入」「inboxCount 0/1/3/20/999」五态逐字相同**、`{{…}}` 被 `defuseTemplateSyntax` 安全化、描述符 `name` / `order` / `interpolate:false`、回调绝不抛错 |
+| tests/recap-pipeline.test.mjs | 17 | `runRecapPipeline` 真跑（真写临时手册）：**流水线不碰命中账本**（取走与落盘都归回合边界）、Reflector 抛错时账本完好、0 候选 + 超容量 → 按最少使用淘汰并落盘、**c 满额先合并**（保留 `created` 更早那条的 id、另一条 `reason=merged`）、**d 守护② 合并失败绝不许阻塞落盘**、满额不再整批拒绝、**j 候选过滤只剩「标题非空」**、merge-inbox 只读报告、检索命中不进账本。**删掉的**：`scoreUsedIds`、整条 `pendingIds` 排除链、`applyGate` 分支与 `gateRejected` |
+| tests/recap-usage.test.mjs | 14 | 第 33 轮整份重写（原 25 条绑计分/结算/pendingIds，全删）：① 回合边界 `takeHitIds` + `flushHits` 一次原子写盘（hits +1、lastHit 毫秒戳、账本取空）；② 同一批只落一次盘；③ 冷却回合不挂待办但命中照写；④ 无命中不写盘（mtime 不变）；⑤ 写盘失败只 warn，下一批仍能落；⑥ 取账本抛错只 warn；⑦ 空闲边沿先等落盘再复盘（steps `['flush:start','flush:done','recap']`）；⑧ 两个空闲边沿重叠不抢同一份待办；⑨ 不传 `takeHitIds` / `flushHits` 什么都不做也不抛；**⑩ i 毫秒戳写入→读回→排序**；**⑪ 守护③ 毫秒戳跨进程排序**（两个独立子进程各算一遍）；⑫ 元数据行无 `helpful` / `harmful`。**第 34 轮改写 + 新增（12 → 14）**：⑤ 改写为「写盘失败只 warn 不抛，但**退回账本**，下个回合边界**真重试落盘**」——第一次 `flushHits` 抛错后账本里仍是 `['ace-001']`、warn 文案含「已退回账本」与「下个回合边界重试」（旧文案「下个回合边界再记」是没实现的承诺，不许再出现）；第二次回合**故意不 note 新命中**，落盘成功只能来自退回的那批（`hits` 变 1、账本变空、`flush` 被调 2 次）；+2「退回账本的命中与下一批新命中合并成一次写盘（不拆成两笔）」、「没有 `noteHitIds` 可退时 warn 明说已丢失」 |
+| tests/recap.test.mjs | 21 | `createRecapController` 状态机真对象直测：回合边界记账与挂待办、空闲边沿复盘、`skipped` 时把冷却与计数还回去、撞忙放回重试（上限 3 次）、真实失败只还 mutating 计数、日志文案与 warn 兜底。**第 33 轮**：`noteTool` / `noteError` / `settlePendingUsage` / `hasPendingUsage` / `pendingUsageIds` 相关用例全部删除 |
+| tests/reflect.test.mjs | 13 | `reflectRounds` 轮次编排：上限 3、第 1 轮空数组立刻收敛、第 2 轮空数组收敛且保留第 1 轮候选、每轮都有新候选则跑满 3 轮硬停、prior 是副本、第 1 轮抛错上抛 / 后续轮抛错按已提炼落盘、每轮一行日志、logger 畸形不炸 |
+| tests/merge.test.mjs | 17 | 第 33 轮 10 → 17：`MERGE_SYSTEM` 四段式（含反例与输出契约）、`mergePairInput`、`parseMergeResult` 七种输入（合法四字段 / 缺字段 / 空串 / 非 JSON / 数组 / 嵌套错位 / 代码围栏包裹）、`survivingEntry`（保留 `created` 更早那条的 id）、`planMerges`（最多 5 轮、每轮一对、某对失败摘掉换下一对、**永不抛错**）、`findMergePairs`（BM25 对称比率 ≥ `MERGE_THRESHOLD_RATIO = 0.5`、互不重叠）、`computeMergeSuggestions` 阈值与排序 |
+| tests/prompts.test.mjs | 5 | **第 33 轮整份新增**：`REFLECTOR_SYSTEM` 四段式——目标段（从本回合轨迹提炼可复用经验）、只做什么段（标题 = 做什么 + 什么场景；条件写「当……时」触发式且要求含用户真会说出口的词；做法动词开头可照做）、不做什么段（**含反例**）、怎么写才能被召回段（讲清 BM25 吃哪些词面、不认语义）；四条断言各钉一段，另有一条钉输出契约 `candidateLine` 的 JSON 形状一字不变 |
+| tests/e2e.test.mjs | 8 | **端到端演练**：假 agent + 假 session + 假事件流驱动插件**真实的**事件处理器，只 mock LLM 调用与宿主事件，**不 mock** archive / inject / playbook / commit / evict / archive-file，断言全部读**真实写出来的临时手册与归档文件**。八个场景见下节 |
+| tests/concurrency.test.mjs | 6 | 真实子进程并发：两个 node 子进程同时操作同一本手册（生产同款 `commitOps` 路径，脚本写在系统临时目录、用完即删）；**第 33 轮**：两个进程各带淘汰钩子同时写 → 被淘汰的搬进 `archive.md` 一条不丢也不重复、淘汰钩子 + 并发冲突同批一起走 |
+| tests/wiring.test.mjs | 12 | 真 import `lib/index.js` 后真调 `apply(ctx, config)`：事件表（**`agent/error` 已随回合判定层删除**）、**b** `ace_playbook` 命中计数（只有带 `query` / `id` 的定向查找 +1、整本读取一次都不计）、**h** 整本读取不含归档条目、`runtimeSnapshot` 七键、`apply()` 真跑一次不抛、三个工具注册进 `ctx.tools` |
+| tests/client-stats.test.mjs | 21 | **第 33 轮**：运行统计**六格**（注入批次 / 注入追加 / 检索命中 / 淘汰数 / 合并数 / 归档数）+ 归档按**四原因**分列（`superseded` / `removed-by-request` / `evicted` / `merged`）+ 注入明细行（批次/追加）+ 两行 note；旧的九格、`scored`、未观测、闸门拦下全部删除；`runtime` 缺失时只留灰字。**第 34 轮（20 → 21）**：注入明细行改成只给**两个数**（跳过/失败两格删掉——它们读的 `runtime.injectedSkipped` / `injectedFailed` 从来不在七键协议里，`num(undefined)` 兜成假 0），夹具里**故意塞进** `injectedSkipped: 999` / `injectedFailed: 888` 两个陷阱字段（加回去就会渲染出 999/888 而不是假 0）；统计块「最近更新」的日期格改成 29 字符毫秒戳夹具 + 经 client 渲染断言恰好 10 字符、不含时区偏移/时分秒；+1 条「日期格对空值/垃圾值给「—」，旧格式照常 10 字符」；原 :713 那条只用源码正则断言「client.js 里出现 injectedSkipped/injectedFailed 两个字段名」的假断言删掉换成行为面断言 |
+| tests/client-entries.test.mjs | 26 | **第 33 轮**：记录页归档分区的四原因中文短语（被取代 / 显式移除 / 最少使用淘汰 / 合并进另一条）、归档条目只读且无删除入口、`toEntry` 十字段（含 `hits` / `lastHit`）、字典键 zh/en 两侧齐全（旧的 `entriesArchiveReasonLowScore` / `Stale` / `runtimeScored` 已删）。**第 34 轮（24 → 26）**：主行夹具的 `updated` 改成 29 字符毫秒戳（原来全是 `2026-09-xx`，永远测不出界面没截断）；+2「毫秒时间戳经 client 真实渲染成 10 字符日期（截断在 client 侧，测试不代劳）」「日期格兼容旧格式（只到日）、空值/垃圾值一律给「—」，绝不渲染 undefined」 |
+| tests/client-picker.test.mjs | 7 | 设置页两个模型下拉：用文件自带的迷你 React（`createElement` / `useState` / `useRef` / `useEffect` + 假 `document` / `fetch`）加载 `client.js` 做逻辑级验证——展开/搜索/键盘上下 + Enter/Esc/点外部关闭/清空回「跟随会话模型」 |
+| tests/entries.test.mjs | 18 | `collectEntries` 的活跃 / 归档两段：字段顺序固定为 `id,title,condition,action,rationale,auto,created,updated,hits,lastHit`、`toEntry({})` 稳定、旧手册缺字段回落、归档段读的是独立 `archive.md`、降级体与成功体同形，外加 `GET /api/dsh-ace/entries` 的 HTTP 面契约（围栏/405/Content-Type/降级） |
+| tests/stats.test.mjs | 13 | `summarizePlaybook` / `collectPlaybookStats`：手册规模与来源、14 天分布、四种降级（needs-session / missing / no-entries / unreadable）、**`runtime` 恒七键且缺字段补 0**、`archivedByReason` 恒四原因、空态 |
+| tests/catalog.test.mjs | 6 | `buildCatalog`：逐个 provider 各自 try/catch + `withTimeout` 15 s、坏掉的 provider 只让自己 `models: []` 并附 `error`、超时只放弃等待不 abort 上游、`payload.bounds.defaults`（`maxEntries` 默认值）读取 |
+| tests/inbox.test.mjs | 10 | merge-inbox：`readInbox` / `writeInboxAtomic` / `addToInbox` / `inboxFull` 的容量上限 `INBOX_CAP`、原子写、坏文件降级空清单、只读报告不写手册 |
+| tests/notice.test.mjs | 8 | `textBlocks` / `noticeMessage` 把文案包成宿主契约要求的 `ContentBlock[]`；裸字符串会让宿主 `.content.some` 抛 `TypeError` 整个会话永久坏死（T226–T228） |
+| tests/playbook-path.test.mjs | 10 | 手册与归档文件位置解析链：绝对路径 / `~` 展开 / 相对工作目录 / 空串 = 本机共享层 `<DSH home>/ace/playbook.md`；**第 33 轮新增** `resolveSharedArchiveFile`（`<DSH home>/ace/archive.md`）与 `resolveArchiveFile`（与手册同目录） |
+| tests/settings-path.test.mjs | 11 | 设置文件位置解析（profileContext → `DSH_PROFILE_DIR` → `DSH_HOME` → `~/.dsh`）与旧文件一次性迁移 `migrateSettingsFile`；其中 T47 的 `mode 0o600` 权限位断言在 Windows 上**条件跳过**（NTFS 不体现 POSIX 权限位，见未验证清单 7）——全量里唯一的 1 skip |
+| tests/heat.test.mjs | 14 | 第 36 轮新增：话题热度的纯逻辑。窗口上限 30（第 31 条进来第 1 条被挤出）、按 agent 隔离、只收有正文的用户消息、`messagesOf` 返回副本；`computeHeat` 每条消息给前 `topPerMessage` 条各 +1、同一话题出现两次记 2 点；**把注入出去的条目 / 伪造的热度图喂回去，计数与顺序一字不变（反自增强）**；热度能改排序，但**0 相关度条目热度再高也不进候选**；候选最大热度为 0（空 Map / 空对象 / 陌生 id / null）时一律按 0 算、不出 NaN；`selectInjection` 透传 heat 且重复调用结果逐字相同 |
+| tests/heat-wiring.test.mjs | 2 | 第 36 轮新增：真宿主桩（`plugin.apply` + 真 `agent/inbox/inserted` + 真 `agent/pre-step`）。agent A 先聊三轮回滚再注入种子 → 注入头一条是带「回滚」的 ace-002；agent B 窗口为空 → 按相关度给出 ace-001；B 自己聊三轮回滚后顺序同样翻转（窗口不跨 agent 串味）；另有一条钉「重启即清空」 |
+| tests/evict-protect.test.mjs | 10 | 第 36 轮新增：`planEvictions` 的保护期。不受保护的够 `need` 时只取它们；不够时用受保护按「hits → created → id」全序补齐；**全在保护期也必须凑够**（不许死锁）；`need` 超过总数返回全部且无重复；`protectDays` 为 `0 / -1 / -365 / NaN / Infinity / undefined / null / ''` 时与旧版逐条等价；边界「恰好 N 天前不算受保护」；`created` 解析不出的一律算不受保护；字符串 `'14'` 等价 14、`3.9` → 3；输入数组不被就地排序、两次调用结果逐字相同 |
+| tests/tuning-behaviors.test.mjs | 4 | 第 36 轮新增：**三个配置项的行为面**（验收 2f：改配置真的改变行为，不是只看值存不存在）。`injectTokenBudget` 4000 → 150 时真发 `agent/inbox/inserted` + 真跑 `agent/pre-step` 投递，注入条数从 5 条降到更少且只砍尾部；`injectMaxEntries` 5 → 2 时预算再宽也只注入 2 条（且与纯函数口径 `selectInjection` 一致）；`evictProtectDays` 0 → 14 时真调 `/ace` 命令走 recap-pipeline → commitOps：0 时淘汰 hits 最少的**新**条目，14 时改淘汰**老**条目、新条目一条不动且活跃条目数仍 ≤ `maxEntries`；`maxEntries` 100 → 3 时前者四条全留、后者恰好腾出 1 位并把 `reason=evicted` 写进 archive.md。**第 37 轮**：配置行为② 尾补一条端到端断言——`injectMaxEntries: 8` 时注入块首行必须写「最多 8 条」且绝不出现「最多 5 条」 |
+| tests/config.test.mjs | 9 | 第 36 轮新增：三个配置项的端到端契约。Config 12 字段与三个默认值；GET `/api/dsh-ace/settings` 的 `value` / `bounds` / `bounds.defaults`；POST 三个键各写一次 → `value` / `stored` / 落盘 JSON 都变；**`evictProtectDays: 0`（数字与字符串 `'0'`）原样保存、不被 `|| 14` 吞掉**；越界值 400 且文案带范围；边界值 min/max 放行；空 body → 400 `no settings provided`；非法值整批原子（合法键也不落盘）；手写设置文件里的 `null` / 空白串回落默认 14 / 900、越界值被丢弃并 warn |
+| tests/diagnose.test.mjs | 24 | 第 37 轮新增：`tools/diagnose.mjs`（**只给调度者诊断用的只读脚本，不进插件运行时、不进设置页**）。全部真跑生产函数：判据常量与日期工具、`bodyChars`；近重复配对（**0.5~0.75 之间的那对也算——钉住阈值是 0.5 不是 0.75**）、对称性、与 `computeMergeSuggestions` 的交叉校验、空手册/只有一条；僵尸条目（`hits=0` 与 `>=60 天` 都抓、59 天放过、边界 60 天算、坏 `lastHit` 只按 `hits` 判）；正文过短（`<80` 才算，**恰好 80 放过**，并写死长度 79/80/81 三条钉住字面阈值）；近 30 天新增与归档（30 天算、31 天与未来不算、四原因分列）；容量读得到与三种读不到降级；**整链诊断跑完前后逐文件字节比对，证明确实零写盘**；渲染 top5 + 「另有 N 条」；手册不存在 / 空文件 / 路径是目录（EISDIR）/ `renderReport` 防御分支 / 归档读不到都不许崩栈；命令行解析（`--key=value` 与 `--key value` 两种写法、未知参数）与**子进程真跑一次**；`A10` 反向接线检查（`lib/` 与 `client.js` 一处都不 import 它）；`localDayString` |
+
+### tests/e2e.test.mjs 的八个场景
+
+| 场景 | 用例名 | 断言要点 |
+| --- | --- | --- |
+| 1 | `E2E 场景1｜mutating 工具结果 → turn-stopping → status idle 真的触发自动复盘并落盘` | 发真实事件序列后 LLM 真被调用、日志含「已挂自动复盘待办」、手册里真的多出落盘条目 |
+| 2 | `E2E 场景2｜多轮复盘在第 3 轮空数组处收敛，候选总数 3 条` | 假 LLM 三轮回 2/1/[]，断言 `rounds === 3`、候选总数 3、日志含「判定收敛（已提炼 3 条）」 |
+| 3 | `E2E 场景3｜候选落盘：新增 / 同标题原地更新 / 完全重复丢弃` | 一条全新 add、一条覆盖同标题旧条目（候选正文比旧条目短 → 走「原地更新」，id 不变）、一条 `normKey` 完全相同被丢弃；活跃条目数与 id 逐个核对 |
+| 4 | `E2E 场景4｜注入 2 条 → 回合边界 hits +1、lastHit 毫秒戳、元数据无 helpful/harmful` | 走 `agent/inbox/inserted` 预检索 → **真调 `agent/pre-step` 处理器**把注入追加成一条 user 消息（断言 `role==='user'`、`source.kind==='dsh-ace'`、`source.form==='injection'`），回合边界 `takeHitIds` + `flushHits` 落盘后这 2 条 `hits` 各 +1、`lastHit` 匹配毫秒戳正则、盘上元数据行里**没有** `helpful` / `harmful` |
+| 5 | `E2E 场景5｜满额淘汰：hits 最少的搬进 archive.md、活跃区腾位、手册无归档区章节` | `maxEntries=3`、三条条目 `hits` 分别 3/1/0 → 新候选落盘时淘汰 `hits` 最少的那条：它进 `archive.md` 且带 `- 归档：reason=evicted date=…`、活跃区不再有它、**手册文件里没有 `## 归档区`**、条目总数一条不少（永不物理删除） |
+| 5b | `E2E 场景5b｜满额先合并：LLM 合成一条、保留 created 更早那条的 id、另一条 reason=merged` | `maxEntries=1` 且已有两条相近条目；第一次 LLM 返回 `[]` 逼出 0 候选分支、第二次返回四字段 JSON 作为合并结果 → 活跃区只剩 1 条且 id 是 `created` **更早**那条的、另一条进 `archive.md` 且 `reason=merged`、落盘照常成功 |
+| 6 | `E2E 场景6｜注入块追加进历史、条数与 token 预算符合契约、纯 BM25 排序` | 注入正文以「【ACE 自动注入】」开头、条数 ≤ 5、tokens ≤ 900；正文逐字相同的三条按 `idNumber` 升序排、`hits=999` 但零字面交集的条目**不进**注入（`hits` 不影响排序）；**红线断言：`sectionText` 不含「【ACE 自动注入】」且仍以「【ACE 操作手册】」开头，`decision.kind==='enter'`、`decision.startsRequestSeries===true` 被保留**；日志含「注入批次已发布」与「注入已追加进历史」 |
+| 7 | `E2E 场景7｜整条链路落盘 + 设置页统计 runtime 七键，整本读取不含归档条目` | 跑完整条链路后 `GET /api/dsh-ace/stats` 的 `runtime` **七键**（`injectedBatches` / `injectedAppended` / `retrievalHits` / `evicted` / `merged` / `archived` / `archivedByReason` 四原因，断言是键集合 deepEqual 全等）与真实日志数字一一对上；`ace_playbook` 整本读取的正文里**不含**归档条目、也不含 `## 归档区`，且这次读取不计命中；带 `query` 的定向检索才让 `retrievalHits` 增加；临时手册与归档文件内容可读回、测试结束清理临时目录 |
+
+跑 e2e 的前提：桩掉 3 个宿主包（schemastery / dsh-tools / dsh-llm）后**真 import** lib/index.js 并真调 `apply()`；`DSH_HOME` / `DSH_PROFILE_DIR` 在 import 之前指向临时目录；手册路径是临时目录里的绝对路径，**绝不碰用户的真实手册**。见上节「桩宿主包真 import lib/index.js」。
+
+**等待判据只等盘上状态，不等日志（曾 flaky，已修）**：e2e 里每一步都用 `diskHas(file, check)` 轮询**真实手册文件的内容**，不用 `logHas` 当 until 判据。理由是日志顺序会随实现变：第五轮把命中记账挪到回合边界之后，那条日志就跑到了候选落盘之前，场景 4 原先拿它当 until 判据 → 判据一满足就读盘、而写盘还没发生 → 间歇性失败，根因是**测试的等待判据**而不是生产缺陷。手册写入走 `writeFileAtomic`（临时文件 + rename），任何时候读盘都读到完整文件，所以「目标状态已在盘上」就等价于「前面几次写都已落盘」。修好之后连跑 `node --test` 二十次全绿。
+
 ## 迁移矩阵
 
 **结论：手册无迁移问题；设置文件有一处位置迁移（T44–T46 覆盖）。**
@@ -310,6 +508,8 @@ npm test
 - [ ] 设置页的两个模型下拉能展开、搜索、键盘上下+Enter 选中、Esc/点外部关闭、清空回「跟随会话模型」；
 - [ ] 只填一项时橙色警告出现，两项都填或都空时消失；
 - [ ] `GET /api/dsh-ace/catalog` 在真实宿主上返回 providers 与 models（需重启 DSH 后验证）；
+- [ ] 设置页 → 「ACE 手册」→ 统计页里，「手册统计」块下方出现「ACE 运行统计」**六格**（注入批次 / 注入追加 / 检索命中 / 淘汰数 / 合并数 / 归档数）与 **四行明细**（归档原因四值 · 注入批次/追加/跳过/失败 · 两个注入口径的差别 · 淘汰与合并的口径）；跑过一轮复盘后数字应随之变大，且与 `ctx.logger` 里的 `dsh-ace: 注入批次已发布…`、`dsh-ace: 注入已追加进历史…`、`dsh-ace: 命中落盘…`、`dsh-ace: 满额先合并…`、`dsh-ace: 满额淘汰…` 几行日志对得上（见未验证清单 13）；
+- [ ] 记录页切到「已归档」能列出归档条目（编号 / 标题 / 归档日期 / 归档原因），展开能看到原因、日期、被哪条取代与正文，且**没有任何删除或还原按钮**；归档数据来自独立文件 `archive.md`，归档原因只有四种中文短语：被取代 / 显式移除 / 最少使用淘汰 / 合并进另一条（见未验证清单 14、16）；
 - [ ] 重启后 `GET /api/dsh-ace/settings` 的 `file` 字段为 `<profileDir>/dsh-ace.json`（如 `C:\Users\adkun\.dsh\profiles\web\dsh-ace.json`），且旧文件 `$DSH_HOME/dsh-ace.json` 仍在、内容未变。
 
 ## 未验证清单（如实声明）
@@ -324,7 +524,50 @@ npm test
 8. **共享层手册在真实宿主上的首次创建未验证**（T48–T56、T74 只覆盖纯逻辑）：`resolvePlaybookFile` 的解析链用注入的 env/home 测过，但「首次读手册时 `<DSH home>/ace` 目录由 `writeFileAtomic` 的 mkdir 补出来、并在写锁内完成初始化」这条要在真实宿主上跑一次 `ace_playbook` 才能确认；同理 `profileContext.home` 在真实 profile 里是否真有值、是否等于 `C:\Users\<你>\.dsh`，也要装后看一次系统提示里打印的手册路径。
 9. **跨进程文件锁**：T57–T73 是进程内用例；另做过手工验证（真实子进程，脚本放系统临时目录，验证后已删除）——① 三写者并发、其中一个持锁 800ms 超过 staleMs：`counter = 3`（不丢写）、临界区不重叠（日志顺序 ENTER A → RELEASED A → ENTER C → RELEASED C → ENTER B → RELEASED B）、目录里无 `.lock` 残留；② 活锁不被抢：A 持锁 3000ms、B 在 500ms 进入，B 一直等到 A 释放后才进入临界区，`counter = 2`；③ 持锁子进程被 `SIGKILL` 强杀后，下一个写者 **16–30ms** 内回收了陈旧锁（靠 `process.kill(pid,0)` 判活，不必等满 10s）。**仍未验证**：真实 DSH 多实例（两个 `dsh web` 进程）同时 curate；`LOCK_TIMEOUT_MS`（30s 放弃）在真实争用下的表现；「活锁者等满 30s 后超时失败」这条在真实宿主上的用户体验；`restoreLock` 在**真实跨卷**（C: → D:）下的放回路径——T73 只在同卷上验证了「link 失败也走兜底」这条分支，没有真的跨卷跑。
 10. **会写手册的三条写入路径把冲突回报给用户的那句话，未在真实宿主上目视确认**：`ace_curate` 的 `conflicts` 字段与 render 文案、自动复盘与 `/ace` **默认复盘分支**共用的 `sendNotice`（首选 `agent.followup`，退回 `agent.inject`），代码路径与文案已定（见 lib/index.js 的 `renderConflictNotice`/`conflictMessage`/`sendNotice`），但「用户真的看到了这条提示」要装进 DSH 后触发一次并发 curate 才能确认。（`/ace review` 不在其中：它只读 merge-inbox 并把条目注入对话，既不写手册也不做冲突判定。）
-11. **自动复盘在真实宿主上「真的落盘」仍未验证——但两道门都已修掉**：原实现的疑点逐个定位并修掉。①**时机**：`agent.runMaintenance` 只在 idle 相位合法（宿主 `~\@deepseek-ai\dsh-agent-loop\lib\index.js:823`），而 `agent/turn-stopping` 派发时 phase 是 running（同文件 `:939`），所以自动复盘此前必然以「already has active work」失败；触发点已迁到 `agent/status` 报 idle 的空闲边沿（见 DESIGN.md I9），T99–T109 覆盖纯逻辑与模拟宿主。②**喂料**：原来只喂「本回合有 N 次 mutating 工具调用」这句计数，实测同一套 Reflector 喂计数返回 `candidates: []`、喂真实轨迹返回 6 条候选——现在 `runRecap` 改喂 `agent.session.deriveMessages()` 渲染出的真实轨迹（lib/trajectory.js，T160–T176 覆盖渲染与喂料形状，含「轨迹为空不调 LLM」）。③**触发窗口**：「有子代理在跑就不记账」那道门已删（子代理是 resident，settle 才注销，真实用法里几乎每轮都命中），T177 与 tests/recap.test.mjs 的改后用例守着。④**喂料截断**：原 `maxChars` 是硬截尾，长回合里开头的任务目标会被整段切掉（实测 51 条消息渲染 12018 字符，输出首行变成「…（前面 11106 字符已省略）」，`目标：修好 build 脚本` 消失），现在改成**首尾都保留**（`maxHeadChars` 3000 保开头 + 中间省略标记 + 结尾吃剩余预算），T169/T178/T179 守着。⑤**结果与工具绑定**：tool 结果行现在带工具名（`结果(read): …`），靠同一次渲染内的 tool-call id 映射反查，T161/T165/T180–T182 守着。⑥**空轨迹跳过不吃额度**：`runRecap` 返回 `{skipped:true}` 时调度器把冷却与 mutating 计数原样还回去（`abandonPendingRecap`），T183–T187 守着；这条回滚路径本身认得「只回滚自己那份待办」且幂等（T190/T191），所以 await 窗口里新挂上的待办不会被吞、额度不会被重复还回去。⑦**退化截断的省略数是自洽的**：`maxChars` 小到放不下尾部时，标记里的 N 恒等于真实丢弃数、标记放不下就返回空串（T188），调用方的「没材料」分支因此能自然生效；整条 summary（含两行标题）也 ≤ `maxChars`（T189）——但这两条都是纯逻辑证据，真实模型收到的 prompt 总长是否确实落在上限内，仍要装后取一次实际 prompt 才能确认。**仍未验证的**：这三条修完之后，真实宿主上跑一次自动复盘、确认手册里真的多出 `auto=true` 条目，仍需**重启 DSH** 才能验证——lib/index.js 是服务半边、在插件加载时被 import，不重启就跑的还是旧代码（本任务环境不允许重启宿主）。同理，idle 边沿与新唤醒之间的竞态退避（`already has active work` → 放回队列 → 下一个 idle 边沿重试）在真实宿主上的实际发生频率也未观测；喂真轨迹后 Reflector 的实际产出质量（候选条数、是否真的并入手册）同样只能在真机上观察；同理，**「空轨迹跳过已经把冷却与 mutating 计数还回去」这条只有纯逻辑证据**（T183–T187 用注入的假 controller 跑），真实宿主里「空轨迹」这一情形会不会真的发生（例如 `deriveMessages()` 返回空、或渲染后 `text` 为空）以及回滚后的下一个回合是否照预期立刻再触发，也要装后观察日志里的那条 `dsh-ace: 回合 N 没有可用的轨迹（没材料）…` 才能确认。
-12. **条目编号在「人同时删最高编号条目 + 删高水位标记」时会复用一次**（已知限制，不修）：历史最大值只存在于手册文档头的那行 `<!-- ace:id-highwater: N -->` 标记里，条目被删掉之后无法从文件本身恢复，因此这两种删除同时发生时该编号可能被复用一次（随后标记被重写成当前最大编号，也就是刚被复用的那个号，因此只会复用这一次）。T114 把这一当前行为钉住；README「已知限制」与 DESIGN.md 的 I2 都已按此措辞写明。**没有**实现「从别处猜回历史最大值」的机制——那需要额外持久化历史，会超出增量演化的边界。
-13. **只读统计端点 `GET /api/dsh-ace/stats` 的真实宿主返回未做 HTTP 验证**：改动落在 `lib/index.js` 的 webServer 前缀路由里，必须重启 DSH 才生效（当前 GUI 就跑在这个进程上，本任务环境不允许重启宿主）。已做的替代验证是纯函数与客户端两侧的单测（T117–T132）：返回值形状、四种降级（needs-session / missing / no-entries / unreadable）、以及统计块在 404 时的降级都钉住了，但**端点本体的真实响应体、以及统计块在真实浏览器里的观感（CSS 布局、14 天条形的宽度与对齐）未目视**。等宿主重启后人工确认：打开设置页 → 「ACE 手册」，应看到条目数显示为 `N / 100`、路径为本机共享手册绝对路径、14 天条形图有非零行、auto 占比 0% 且旁边有「自动归档尚未落盘过」灰字。
-14. **只读条目端点 `GET /api/dsh-ace/entries` 的真实宿主返回未做 HTTP 验证**：改动同样落在 `lib/index.js` 的 webServer 前缀路由里，必须重启 DSH 才生效。已做的替代验证是 T133–T145：纯函数与只读 IO 直接跑（分支本体只做「调它 + send」），分支的围栏顺序、405、错误体与 Content-Type 用源码级断言钉住；**端点本体的真实响应体、以及「记录列表详情页」在真实浏览器里的渲染未目视**。等宿主重启后人工确认：`GET /api/dsh-ace/entries` 应返回 `{ ok:true, entries:[…全量…], total:N, maxEntries:100, pathKind, playbookPath }`；手册路径为相对路径时应返回 `{ ok:true, reason:'needs-session', entries:[], total:0, maxEntries:100 }` 而不是 500。
+12. **条目编号在「人同时删最高编号条目 + 删高水位标记」时会复用一次**（已知限制，不修）：历史最大值只存在于手册文档头的那行 `<!-- ace:id-highwater: N -->` 标记里，条目被删掉之后无法从文件本身恢复，因此这两种删除同时发生时该编号可能被复用一次（随后标记被重写成当前最大编号，也就是刚被复用的那个号，因此只会复用这一次）。T114 把这一当前行为钉住；README「已知限制」与 DESIGN.md 的 I2 都已按此措辞写明。**没有**实现「从别处猜回历史最大值」的机制——那需要额外持久化历史，会超出增量演化的边界。**第 33 轮把归档搬进独立文件之后，这条高水位的计算面变宽了**：`lib/commit.js:177` 现在取 `Math.max(readIdHighWater(parsed), maxEntryIdNumber(parsed.entries || []), maxArchivedIdNumber(archiveEntries), maxEntryIdNumber(baseEntries))`——活跃区与归档文件两边的最大编号都算进去，且**必须在「满额淘汰」之后才算**（淘汰会把活跃条目搬进归档；先算的话，手写手册下新条目会复用刚被搬走的编号）。由 tests/archive.test.mjs:322「f｜满额淘汰：hits 最少的两条进 archive.md」与 :363「f｜commitCapacity」两条用例守着。上面那条「人同时删条目与标记」的已知限制**仍然存在**，与本条无关。
+
+13. **只读统计端点 `GET /api/dsh-ace/stats` 的真实宿主返回未做 HTTP 验证——尤其「打开设置页就能看到 ACE 运行统计」这条**：改动落在 `lib/index.js` 的 webServer 前缀路由里，必须重启 DSH 才生效（当前 GUI 就跑在这个进程上，本任务不允许重启宿主）。已做的替代验证分三层：①纯函数单测（tests/stats.test.mjs，13 条）：返回值形状、四种降级（needs-session / missing / no-entries / 坏 JSON）、`normalizeRuntime` 恒返回七键（`archivedByReason` 四键）；②`lib/index.js` 的接线用 `tests/wiring.test.mjs` 真跑 `runtimeSnapshot()` 之后逐键比对；③源码级断言钉住围栏顺序与 405。**仍未验证的是「用户在自己的宿主里打开设置页、看到的那一排数字」**：端点本体的真实响应体、以及两个统计块在真实浏览器里的观感（CSS 布局、14 天条形的宽度与对齐、运行统计块与手册统计块的相对位置）均未目视。等宿主重启后人工确认：打开设置页 → 「ACE 手册」，应看到条目数 `N / 100`、本机共享手册绝对路径、14 天条形图有非零行、**下方「ACE 运行统计」六格：注入批次 / 注入追加 / 检索命中 / 淘汰数 / 合并数 / 归档数**，以及四行明细（归档原因四值 `superseded` / `removed` / `evicted` / `merged`、注入批次/追加/跳过/失败、两个注入口径的差别、「淘汰与合并的口径」）。注意运行统计是**进程内存态**：重启宿主后它会从 0 重新开始，那是预期行为，不是丢数据。
+14. **只读条目端点 `GET /api/dsh-ace/entries` 的真实宿主返回未做 HTTP 验证，含归档分区**：改动同样落在 `lib/index.js` 的 webServer 前缀路由里，必须重启 DSH 才生效。已做的替代验证是 tests/entries.test.mjs 的 18 条 + tests/client-entries.test.mjs 的 24 条：纯函数与只读 IO 直接跑（分支本体只做「调它 + send」），分支的围栏顺序、405、错误体与 Content-Type 用源码级断言钉住；`collectEntries` 的 `archived` 一段现在读的是**独立归档文件 `archive.md`**（`lib/archive-file.js` 的 `readArchiveSnapshot`，ENOENT 时返回空归档、不造文件）。等宿主重启后人工确认：`/entries` 在手册文件缺失/损坏时返回 `{ entries: [], total:0, archivedTotal:0, maxEntries:100 }` 而不是 500；页面上切到「已归档」应看到原因（**被取代 / 显式移除 / 最少使用淘汰 / 合并进另一条**，共四种）与归档日期。
+15. **「整条链路真的在跑」这条证据，本阶段用 tests/e2e.test.mjs 代替了真实会话自证，但它仍然不是真机证据**：e2e 用假 agent / 假 session / 假事件流驱动插件**真实的事件处理器**，只桩掉 3 个宿主包与 LLM 调用，archive / inject / eviction / merge / playbook / commit 全部是真代码、真读写临时手册与临时 `archive.md`——它能证明「接线没断、落盘结果对」，但**证不了宿主真实的事件时序**（例如 `agent/status` 报 idle 与 `runMaintenance` 的真实相位）。这些只能在重启后的真实会话里观察日志确认（第 28 轮起还要看 `dsh-ace: 注入批次已发布` 与 `dsh-ace: 注入已追加进历史` 两条日志是否一一对应，以及追加次数是否 ≈ 批次次数；第 33 轮起还要看 `dsh-ace: 命中落盘` 与 `dsh-ace: 满额淘汰` / `dsh-ace: 满额先合并` 是否按回合出现）。
+16. **归档分区在真实浏览器里的观感未目视**：归档独立文件 `archive.md` 的解析/序列化、归档行的文本格式、归档条目只读、无删除入口都有单测与 e2e 取证（tests/archive.test.mjs:425「g｜归档文件格式与手册同构」、:442「g｜归档文件写入不留残渣」），但「切到已归档后那一屏长什么样」（行高、四列对齐、展开后的六个详情块、未知原因回显原串时的换行）没有在浏览器里看过。
+17. **「命中账本在回合边界取走并原子落盘」的顺序在真实宿主上的时序未观测**：判据依赖两个真实事件的先后——`agent/turn-stopping` 必须先于同回合的空闲边沿 `agent/status`(idle) 到达，且 `onStatus` 里 `await` 上一次命中落盘的 Promise 链不插进复盘的 await 窗口。tests/recap-usage.test.mjs 用控制器真对象按受控时序逐条钉住了九种情形（冷却回合也取、同一批只落一次、写盘失败只 warn、两个空闲边沿重叠不抢同一份待办、`steps` 顺序），tests/recap-pipeline.test.mjs 用 tripwire 钉住「流水线不许自己取账本」；**真实宿主上的事件顺序没有观测过**。装进宿主后的判据是：`hits` 只在回合结束后增长、且 `lastHit` 落在该回合的时间窗内。
+18. **`flushHits` 的写盘永远不返回时，下一个空闲边沿会一直挂着**（已知取舍，未观测）：`onStatus` 在复盘之前 `await` 上一次命中落盘的 Promise 链（`lib/recap.js` 的 `hitFlushes` WeakMap），这样命中不会丢；代价是如果那次写盘永远不返回（跨进程锁一直拿不到、盘卡死），该回合的复盘也就不执行。真实宿主上**未观测**到这种情形——写盘内部有 `LOCK_TIMEOUT_MS = 30000` 兜底（`lib/playbook.js:549`），正常路径会以失败收场并只 warn（`lib/recap.js:121`）。要确认得装进宿主后观察 `dsh-ace: 命中落盘失败…` 这行日志是否出现。
+19. **毫秒时间戳的排序只在单进程与两个独立子进程里验证过，跨时区/跨机未验证**：`lib/timestamp.js` 的 `nowStamp` 写的是**本地时区**偏移（`+08:00`），`compareStamps` 是纯字符串比较——同机同偏移下字典序即时间序，但**跨时区混写**（两台机器不同偏移）时字符串比较会与真实时刻不一致。tests/recap-usage.test.mjs 的 i 与守护③ 只覆盖「同一台机器、两个完全独立的子进程各算一遍、结论必须一致」；旧格式 `YYYY-MM-DD` 条目照常解析、排在同样日期更早的位置，这条有用例。
+
+20. **合并提示词在真实模型上的产出质量未实测**：tests/merge.test.mjs 的 17 条钉的是 `MERGE_SYSTEM` 的四段结构、`parseMergeResult` 的七种输入与 `planMerges` 永不抛错的确定性行为；tests/recap-pipeline.test.mjs 的守护② 钉的是「LLM 抛错或输出不合格 JSON 时不许阻塞落盘」。但「真实模型拿到两条经验之后能不能合成一条同构的四字段条目、会不会把两条的取舍关系写丢」只能靠真实会话观察——已做的替代验证是 e2e 场景 5b 用一个返回四字段 JSON 的桩把整条链路跑通。
+21. **`hits` 作为唯一淘汰依据的长期分布未观测**：淘汰只在满额时发生，判据是 `hits` 升序 → `created` 更早 → `idNumber` 数字升序；但「手册长期跑下来 `hits` 会不会严重偏斜（少数条目吃掉全部命中、其余永远 0）」需要真实会话跑一段时间才能看出来。**这一轮没有实现任何再平衡机制**（那会引入新的权重面与新的误判面）。若真出现偏斜，处理办法是合并（把近似的 0 命中条目并成一条），而不是给 `hits` 加衰减。
+
+## 已知取舍与已知限制（第八轮判定，按原样记，不写成缺陷）
+
+**结论：下面三条是修复方在第八轮审查里逐条判定为「不动」的取舍。它们不是待修的缺陷，写在这里是为了让后来者知道「代码为什么长这样」，而不是当成违章去改。**
+
+- **P2-a｜命中落盘没有自己的超时，靠文件锁的 30 秒兜底**：`flushHits` 最终落到一次手册写盘（`writeFileAtomic` 在 `withExclusiveLock` 里），锁自身的 `LOCK_TIMEOUT_MS = 30000`（`lib/playbook.js:549`）就是真实上界——拿不到锁会在 30 秒后以失败收场，走「只 warn + 退回账本、下个回合边界重试」那条路（`lib/recap.js` 的 `flushHitsNow` catch 分支）。再叠一层独立超时只会让「到底该由谁放弃」出现两个口径，所以不加。**已知限制**：写盘跨过了回合边界仍在飞时，下一次写会排在它后面（`hitFlushes` 的 Promise 链），慢盘上会串行化。
+- **P2-d｜每回合一次全量写盘（写放大），是设计取舍**：一次命中落盘 = 一次 `commitMeta`，每次都把整份手册序列化后原子写一遍；复盘那一步的 `commitOps` 也是整份写。手册当前规模（几十到上百条）下这不是瓶颈，而「命中只增不减、晚记不会算错任何东西」本来就是刻意换来的正确性——放进回合边界一次写，是为了不在一回合里写十几遍同一份文件。**要优化得先有实测的写放大证据**（手册多大、每回合几次写、耗时多少），本阶段没做这个测量。
+- **P2-e｜`INJECT_MIN_ENTRIES = 3` 只有对外契约、没有实现**：`lib/inject.js:17` 导出它，`selectInjection`（`lib/inject.js:148`）只取 `INJECT_MAX_ENTRIES = 5` 与 `INJECT_TOKEN_BUDGET = 900` 两个上限；`lib/inject.js:139-141` 的注释写明「不足 3 条不硬凑——相关度不够就按实际条数注入（这个常量只用于对外契约与测试断言，逻辑上不做任何补足）」。也就是说「一次注入 3–5 条」里的那道**下限没有实现**：命中 1 条时就注入 1 条。这是有意的（硬凑会把不相关条目塞进注入消息，比少注入更伤），但如果需求方要的是真下限，得单独决定「不够 3 条时怎么办（补低相关条目 / 干脆不注入）」——本阶段不自行改设计。
+
+## 已知取舍与已知限制（第 33 轮判定，按原样记）
+
+**结论：下面四条是第 33 轮「把正负评分换成绩效淘汰」时判定为「按原样记、不写成缺陷」的取舍。它们都是设计换来的代价，不是待修项。**
+
+- **P33-a｜`hits` 只数「被自动注入」与「被定向检索」，不数「被整本读过」**：整本读取（`ace_playbook` 不带参数）一次都不计数——整本读取没有「用上哪一条」的信号，把它记成命中会让「读一眼清单」等价于「真的用它」。代价是一条长期只被整本读取、从不被注入的经验会被当作 0 命中淘汰。**这是有意的**：宁可让「没人真的用到」的条目走，也不让「翻过目录」冒充使用。
+- **P33-b｜合并是最慢的一步，且合并失败会退化成淘汰**：满额时先试 LLM 合并（最多 5 轮、每轮一对），这意味着满额那一回合要多花 1–5 次模型调用；全部失败就直接按 `hits` 淘汰腾位。**代价是有可能把两条本来能合成一条的经验拆着淘汰**，换来的是「绝不因为一次 LLM 抽风就把整批候选丢掉」。历史教训就是这般：一轮 LLM 抛错就把整晚的复盘全丢。
+- **P33-c｜毫秒时间戳让元数据行变长，且同毫秒并列只能靠 id 兜底**：`created` / `updated` / `lastHit` 从 `YYYY-MM-DD`（10 字符）变成 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`（29 字符），每条的元数据行固定多出约 57 字节（手册 100 条 ≈ +5.6 KB，人眼扫读也更吵）。同毫秒并列没有更细的时间源可用，只能由 `idNumber` 数字升序兜底——**排序仍然是确定的**，只是「谁更早」在这个精度上不可分辨。界面上仍只显示到日。
+- **P33-d｜归档文件 `archive.md` 只增不减，长期会超过手册本身**：软归档永不物理删除（红线），淘汰与合并掉的经验全部堆在归档文件里，条目越多它越长（当前设计没有任何压缩或分卷）。这是**有意的**：人可以在设置页读它、也可以直接手改它，「删掉」这个动作永远留给人来做。代价是长期使用后这个文件会一直长，且它不参与任何检索（不进注入、不进复盘、不进整本读取）。
+
+## 第 33 轮作废的旧结论（只记一笔，不重写）
+
+**结论：下面这些第 8/9/10 轮记下的取舍与终审结论，绑的都是第 33 轮已整层删除的机制，因此不再成立。** 留着这节是为了让后来者知道「为什么那些段落消失了」，而不是去把它们找回来。
+
+- **作废 A｜第九轮 R9-a…R9-d 与「路线 A 成立」的终审结论**：它们钉的是「归档判定必须读结算后的分数」，靠 `pendingIds` 排除链 + 归档扫描前先结算。第 33 轮删掉 `scoreUsedIds` / `scanArchives` / `pendingIdSet` / `settling` / `settlingIds` / `usages` 之后，**没有分数可读、也没有归档扫描**——腾位改由「满额 + 最少使用淘汰」确定性触发，不存在「读到未落盘的旧分数」这个窗口。
+- **作废 B｜第十轮 R10-a…R10-d**：R10-a（唯一可归档条目恰在待结算集合里 → 整批被拒）不再发生，淘汰判据不看结算状态、也不整批拒绝；R10-b（`settlingIds` 挂死）随 `settlingIds` 删除而不存在；R10-c（`pendingIdSet` 异常兜底零用例）随该函数删除而不存在；R10-d（`commitArchives` 默认归档计划生产不可达）随该入口删除而不存在。
+- **作废 C｜未验证清单第 17–21 条（旧版）与人工 review 的「九格 + 五行明细」**：旧 17 是「结算顺序未观测」、18 是「在飞结算挂死」、19 是「`pendingIdSet` 抛错降级」、20 是「三层闸门拦截率」、21 是「未观测回合就地结算」——全部绑在已删机制上，已按新版 17–21 条改写；人工 review 的九格与「已归档视图：净分过低 / 长期未命中 / 被新条目取代」也已按六格 + 四原因改写。
+- **作废 D｜tests/gate.test.mjs 与 tests/probation.test.mjs 的全部用例**：19 + 13 条随 `lib/gate.js` 与 `PROBATION_*` 一起删除，**不是被标 skip、也不是断言被放宽**；等价强度的新判据在 T232–T245 与三条守护用例里。
+
+## 已知取舍与已知限制（第十轮终审判定，第 33 轮已作废，原文保留）
+
+**结论：下面四条是独立终审判定为「无阻断、按原样记」的 P2。它们不是待修缺陷，写在这里是为了让后来者知道边界在哪。** 其中 R10-a…R10-d 已于第 33 轮作废（见上一节「第 33 轮作废的旧结论」），原文保留作历史。
+
+- **【第 33 轮已作废，仅作历史】** **R10-a｜满额那一轮若「唯一可归档的条目」恰在待结算集合里，本批候选会整批被拒**：`commitOps` 的满额腾位用同一份 `pendingIds` 排除待结算 id（`lib/commit.js:110-118`），腾不出位时 `applyOps` 按容量判据整批 `throw`（`lib/playbook.js:484-486`），复盘以失败收场并推一条提示（`lib/recap.js:471-473` 的 `notifyFailure`）。**这是有界的、非静默的、也不误归档**：终审探针连跑三个空闲边沿，实见回合 2 / 4 / 6 各拒一次（其中后两次属于设计内的「本来就没有该归档的条目，所以拒绝」），丢的是这一批候选，已有条目一条不少。代价是极端情况下那批候选要等人再触发一次复盘。
+- **【第 33 轮已作废，仅作历史】** **R10-b｜`settlingIds` 要等 `task` 真正 settle 才清，结算挂死时新注入的 id 对归档判定不可见**：`settlingIds` 在 `clear()` 里随 `settling` 一起摘除（`lib/recap.js:286-290`），而 `clear` 挂在 `task.then(clear, clear)` 上。若 `settleUsage` 永远不 resolve，这份集合就一直留在 WeakMap 里——新注入的 id 会被它挡住（归档判定看不见它们），同时 `onStatus` 也会一直等那份在飞结算。生产实现是本地锁内读写、外加 `LOCK_TIMEOUT_MS = 30000`（`lib/playbook.js:627`）兜底，与第八轮的 P2-a 是同一个面，见未验证清单 18。
+- **【第 33 轮已作废，仅作历史】** **R10-c｜`pendingIdSet` 的异常兜底零用例覆盖**：求值抛错 → 返回空集、退回改动前的行为（`lib/archive.js:99-107`），这条降级路径**没有用例**。终审把这段故意改坏，196 条相关用例仍然全绿——也就是说「查询坏掉时不炸复盘」目前只有代码注释在保证，没有机检。见未验证清单 19。
+- **【第 33 轮已作废，仅作历史】** **R10-d｜`commitArchives` 的默认归档计划在生产路径上不可达，它的 `pendingIds` 透传也没有覆盖**：不传 `archive` 选项时它自己调 `scanArchives`（`lib/commit.js:184-186`），但仓库里唯一的调用方（`lib/recap-pipeline.js:215-217`，0 候选分支）总是显式传钩子，所以那条默认分支只在测试里被走过（`tests/archive.test.mjs:161` / `:617`）。终审把它的 `pendingIds` 透传改坏，用例仍然全绿——属「生产不可达 + 无覆盖」，留着是因为它是 `commitArchives` 的对外契约（直接调它的人可能不传 `archive`）。
