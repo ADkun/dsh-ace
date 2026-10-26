@@ -634,6 +634,34 @@ GET /api/dsh-ace/entries
 - **降级一律不崩**：手册不存在 / 空文件 / 路径是目录 / 解析抛错 / 归档读不到 / 设置文件 JSON 坏 —— 每种都只打一行带路径的人话，脚本 exit 0，不吐栈。
 - **零写盘是机检项而非承诺**：tests/diagnose.test.mjs 的 `A6` 真跑一遍完整诊断，然后逐字节比对「诊断前后目录内每个文件」，并检查源码里没有任何 `writeFile` / `appendFile` / `mkdir` / `rename` / `unlink` / `rm(` / `writeFileAtomic` / `withExclusiveLock`。
 
+## 第 38 轮：打分加「文档侧索引」缓存、召回段升级成硬要求
+
+### scoreEntries 的文档侧索引缓存（纯性能，零语义变化）
+**为什么**：`scoreEntries`（lib/playbook.js）原实现每个 term 都把全库重扫一遍算 df，并且每次调用都把全部条目的四个字段重新 `querySegments` 一遍。注入路径每条用户消息跑一次、`computeHeat`（lib/heat.js）还会对最近 N 条历史各跑一次同一检索，实测 N=100 每次 5.621ms、N=500 45.452ms（中位，200 次轮换 query）——这是真实可感卡顿的源头。
+
+**改了哪**：只加缓存，打分公式一个字没动（querySegments 重叠 2-gram、K1=1.2、b=0.75、`idf = log((N-df+0.5)/(df+0.5)+1)`、非重叠子串 tf、排序 `b.score-a.score || a.i-b.i`、`score>0` 过滤全部原样）。缓存三件套：①**语料索引**（doc 文本 / 文档长度 / N / avgdl）②**term→df 映射**（懒加载，按 term 现算现存）③**排序与过滤口径**仍在 `scoreEntries` 里现算，不进缓存。
+
+**三条硬约束（任一破了都是返工）**：
+- **key 是内容摘要，不是数组身份**：`readPlaybookSnapshot` 每次 parse 都返回新数组，按身份缓存永不命中（实测 200/200 不命中）；摘要用 FNV-1a 扫一遍拼接文本（`Math.imul` 32 位，无 `crypto.createHash`），摘要之外再用 `sameDocs` 逐条比对挡住哈希碰撞。按摘要实测命中。
+- **容量有界**：语料索引只留最近一份（`INDEX_CACHE_LIMIT = 1`，满了 `clear()`），df 映射封顶 `DF_CACHE_LIMIT = 2048`（满了 `clear()`）。不做无界 Map。
+- **摘要开销必须小于它省下的开销**：FNV-1a 一遍扫描是 O(总字符数)，而它省下的是「每 term 全库重扫 + 每次调用全库分词」，量级差在 term 数上。
+
+**怎么机检**：
+- `tests/playbook.test.mjs` 的 5 条 `R38｜` 用例：缓存命中返回等价结果（换数组身份、内容不变）/ 语料内容变化后失效 / 容量恒为 1 且打 200 份不同语料也不涨 / 与「关掉缓存」的朴素实现逐条比分（4 组语料 × 9 条 query）/ `matchEntries` 的 `score>0` 过滤与整本兜底口径不变。
+- **等价性对照台**（仓库外，`%TEMP%\dsh-ace-retrieval-probe\probe-eq.mjs`）：参照实现 = 原文 `scoreEntries` 逐字复刻，100 条真实手册 × 38 条 query 逐 query 比顺序 + 下标 + 分数 → **同序 324/324（含 matchEntries 48/48 与 6 组语料变体），最大分数偏差 0.000e+0**。
+- **性能对照台**（同目录 `bench-time.mjs`，200 次轮换 query 取中位）：N=100 **5.621ms → 0.512ms**（p95 8.941 → 0.794）；N=500 **45.452ms → 2.535ms**（p95 109.647 → 3.828）。冷索引对照 N=500 为 61.3ms（首调一次性建索引，比改前的 45.452ms 慢，但只在语料真的变了之后发生一次）。
+
+**边界**：缓存是纯同步内存操作——无 await、无定时器、无后台任务、无文件句柄，不存在新增的阻塞事件循环的路径；进程退出即丢弃，不落盘、不进任何可观测计数（`bm25IndexStats()` 只给测试用，不进 `/stats`）。
+
+### 复盘提示词：召回那一节从软建议升级成硬要求
+**为什么**：`REFLECTOR_SYSTEM`（lib/prompts.js）原第 3 条只说「尽量用用户最可能说的那个词」「必要时把同义词也带一句」，是软建议，复盘模型经常挑最省事的那条妥协，条目于是在用户提问时永远召不回。BM25 只认词面，召回质量完全由 condition/action 里写了多少「用户真会打的字」决定。
+
+**改了哪**：`## 怎么写才能被召回` 一节改成硬性门槛——**每条候选的 condition 或 action 至少带 2 个「用户真会打出来的说法」**，三类：①日常叫法（不是内部术语）②症状词（报错原文片段 / 「不显示」「对不上」「重复」「超时」）③动作词（「排查」「重跑」「对比」「清理」）；凑不够就重写，不许提交。另加「**同一个东西有几种叫法就写几种**」+ 正例（症状词 + 动作词）/ 反例（通篇只有 `rankInjection`、`normalizeScore` 这类内部术语）对照。原两条约束原样保留：不写只出现一次的名字（会稀释词频）、不写「本次 / 这一轮」这类永不触发的条件词。
+
+**没动的**：输出契约（`{candidates:[{title,condition,action,rationale}],notes}`）一字未改，段落顺序与其余段落结构未动，不新增 LLM 调用。
+
+**怎么机检**：`tests/prompts.test.mjs` 原有 5 条 test 一条没删（`/BM25[^\n]*不认语义/`、`/复现的词面/`、`/同义词/` 三条钉子照旧），另新增 2 条钉住硬要求的数量门槛与正例/反例。
+
 ## 第 34 轮：审查 report33 的修复（只增不删）
 
 **任何一步失败都不许整批拒绝候选**（建议修 6）：`commitOps` 里 `evictPlan` 抛错或返回非数组时，不再 `moves = null` 然后让容量校验把整批候选拒掉（旧行为：`lib/commit.js:161-165` 只吞错、不腾位，`lib/playbook.js:423` 于是抛「整批拒绝」，本回合候选一条都没落盘）。现在走内置确定性兜底 `planEvictionMoves`（`lib/commit.js:79-114`）：把不受保护的条目按 `compareForEviction` **全序**排序取前 N 条（N = 需要腾出的位数），**顺序仍然确定、不随机**，并写一条 `dsh-ace: 淘汰计划失败，已改用内置兜底（按 compareForEviction 全序排序取前 N 条，顺序仍确定不随机），本批候选照常落盘`。兜底本身也失败才允许抛错。用例：tests/archive.test.mjs 的 i1（`evict` 必抛）与 i2（`evict` 返回 `undefined`）——两条都断言候选照常落盘、被淘汰的条目进了 `archive.md` 且 `reason=evicted`、兜底结果与 `planEvictions` **逐条相同**（证明是同一判据，不是随便挑）、日志含兜底提示。变异：把兜底分支改成 `if (false)` → i1/i2 变红。

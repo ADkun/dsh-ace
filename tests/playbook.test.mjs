@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { parsePlaybook, serializePlaybook, applyOps, digestEntries, withLock, withExclusiveLock, writeFileAtomic, readOrInitPlaybook, readPlaybookSnapshot, detectConflicts, describeConflicts, restoreLock, matchEntries, querySegments, withFileLock, LOCK_STALE_MS, readIdHighWater, ensureIdHighWater, ID_HIGHWATER_RE, markHits } from '../lib/playbook.js';
+import { parsePlaybook, serializePlaybook, applyOps, digestEntries, withLock, withExclusiveLock, writeFileAtomic, readOrInitPlaybook, readPlaybookSnapshot, detectConflicts, describeConflicts, restoreLock, matchEntries, scoreEntries, bm25IndexStats, querySegments, withFileLock, LOCK_STALE_MS, readIdHighWater, ensureIdHighWater, ID_HIGHWATER_RE, markHits } from '../lib/playbook.js';
 import { readArchiveSnapshot } from '../lib/archive-file.js';
 import { detectAddConflicts, detectAllConflicts } from '../lib/merge.js';
 import { commitOps, commitMeta } from '../lib/commit.js';
@@ -1114,3 +1114,134 @@ test('C1｜commitMeta：没有任何安全项时一条都不写盘', async () =>
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
+
+// —— 第 38 轮 L1：scoreEntries 的「文档侧索引」缓存 ——
+// 打分口径一个字都没改，只是把只跟语料有关的量（doc 文本 / 文档长度 / term→df）缓存起来。
+// 下面几条钉住的正是缓存最容易错的地方：按内容摘要命中、语料一变就失效、容量有界、口径逐条不变。
+
+const C38 = [
+  E('ace-001', '注入前先过滤候选', '当注入的内容不显示、条目像没生效时', '排查打分与热度权重，重跑一次对比结果', '命中率低'),
+  E('ace-002', '归档要留正文', '当清理历史条目、要归档时', '迁移前先复制正文再删', '丢过一次正文'),
+  E('ace-003', '测试先跑失败用例', '当重跑测试套件时', '先跑失败用例再跑全量', ''),
+];
+const C38_QUERIES = ['注入不显示怎么办', '归档 清理', '重跑测试', '对不上', '部署'];
+const rankOf = (entries, query) =>
+  scoreEntries(entries, query).map((x) => x.e.id + ':' + x.score.toFixed(12) + ':' + x.i);
+
+test('R38｜scoreEntries 缓存命中返回等价结果（换数组身份、内容不变，按内容摘要命中）', () => {
+  for (const q of C38_QUERIES) {
+    const a = rankOf(C38, q);
+    // 每次调用都喂全新的数组与全新的条目对象（模拟 readPlaybookSnapshot 每次 parse 出新数组）
+    const fresh = C38.map((e) => ({ ...e, meta: { ...e.meta, extraLines: [] } }));
+    const b = rankOf(fresh, q);
+    assert.deepEqual(b, a, '换数组身份后结果必须逐字一致：' + q);
+  }
+  // 内容摘要命中：上面第二轮 query 全部是缓存命中，容量始终是 1
+  const st = bm25IndexStats();
+  assert.ok(st.hits > 0, '按内容摘要必须真的命中过缓存（按数组身份会 0 命中）');
+  assert.equal(st.size, 1, '同一份语料只占一个缓存槽');
+  assert.ok(st.hits + st.misses > 0);
+});
+
+test('R38｜语料内容变化后缓存失效，返回新语料的结果', () => {
+  const before = rankOf(C38, '重跑测试');
+  const edited = C38.map((e) =>
+    e.id === 'ace-003'
+      ? { ...e, action: '重跑测试时先跑失败用例，再清理临时目录', title: '重跑测试前先看失败用例' }
+      : e);
+  const after = rankOf(edited, '重跑测试');
+  assert.notDeepEqual(after, before, '改过正文的条目必须拿到新语料的打分（旧缓存不许被当成新语料）');
+  // 再加一条新条目：N 变了，idf 与 avgdl 都必须跟着变
+  const grown = edited.concat([
+    E('ace-004', '对比结果', '当要对比两次结果、确认对不上时', '重跑一次对比差异', ''),
+  ]);
+  const afterGrow = rankOf(grown, '重跑测试');
+  assert.equal(afterGrow.length, C38.length + 1, '新条目参与打分');
+  // 同一份改后语料反复打：缓存命中，结果稳定
+  assert.deepEqual(rankOf(grown, '重跑测试'), afterGrow);
+  // 把更早的语料再打一次：容量只有一槽，必须按内容重建而不是拿到别的语料的索引
+  assert.deepEqual(rankOf(C38, '重跑测试'), before, '回到旧语料要重新算出旧结果（缓存按内容、不按调用顺序）');
+});
+
+test('R38｜缓存不无限增长：容量恒为 1，随便打多少不同语料都不涨', () => {
+  for (let i = 0; i < 200; i++) {
+    const corpus = [E('ace-001', '标题' + i, '条件' + i, '做法' + i, '')];
+    scoreEntries(corpus, '标题' + i);
+    assert.equal(bm25IndexStats().size, 1, '第 ' + i + ' 轮后缓存槽位仍应只有 1 个');
+  }
+  const st = bm25IndexStats();
+  assert.equal(st.limit, 1, '容量上限写明是 1（只留最近一份语料）');
+  assert.ok(st.size <= st.limit, '任何时刻都不超过上限');
+});
+
+test('R38｜缓存不改变打分口径：与「关掉缓存」的朴素实现逐条比分数', () => {
+  // 朴素实现 = 加缓存之前那版（每个 term 全库重扫），在这里逐字复刻，用来做对照。
+  const countOccurrences = (text, term) => {
+    let n = 0;
+    let i = 0;
+    while ((i = text.indexOf(term, i)) !== -1) {
+      n++;
+      i += term.length;
+    }
+    return n;
+  };
+  const naive = (entries, query) => {
+    const terms = querySegments(query);
+    if (!terms.length || !entries.length) return entries.map((e, i) => ({ e, i, score: 0 }));
+    const docs = entries.map((e) =>
+      [e.title, e.condition, e.action, e.rationale].map((s) => s || '').join('\n').toLowerCase());
+    const dls = docs.map((d) => querySegments(d).length || 1);
+    const avgdl = dls.reduce((a, b) => a + b, 0) / entries.length;
+    const N = entries.length;
+    const K1 = 1.2;
+    const B = 0.75;
+    const scored = entries.map((e, i) => {
+      let score = 0;
+      for (const t of terms) {
+        const tf = countOccurrences(docs[i], t);
+        if (!tf) continue;
+        let df = 0;
+        for (const d of docs) if (d.includes(t)) df++;
+        const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
+        score += idf * (tf * (K1 + 1)) / (tf + K1 * (1 - B + B * dls[i] / avgdl));
+      }
+      return { e, i, score };
+    });
+    return scored.sort((a, b) => b.score - a.score || a.i - b.i);
+  };
+  const corpora = [
+    C38,
+    C38.slice().reverse(),
+    C38.slice(0, 2),
+    C38.concat([E('ace-009', '重复 重复', '超时 对不上', '排查 清理', '')]),
+  ];
+  const queries = C38_QUERIES.concat(['', '，。！', 'a', '注入 归档 测试 配置 重命名']);
+  for (const corpus of corpora) {
+    for (const q of queries) {
+      const want = naive(corpus, q).map((x) => x.e.id + ':' + x.score.toFixed(12) + ':' + x.i);
+      const got = rankOf(corpus, q);
+      assert.deepEqual(got, want, '与朴素实现必须逐条一致：query=' + q);
+    }
+  }
+});
+
+test('R38｜matchEntries 口径不变：score>0 过滤与整本兜底都照旧走缓存版 scoreEntries', () => {
+  assert.deepEqual(matchEntries(C38, '归档 清理').map((e) => e.id), ['ace-002']);
+  assert.equal(matchEntries(C38, '完全无关的英文词 zzzz').length, C38.length, '零命中回退整本');
+  assert.equal(matchEntries(C38, '，。！').length, C38.length, '纯标点无片段 → 整本');
+});
+
+test('R38｜同分时保持条目原序：排序键是 score 降序 + 同分按原下标', () => {
+  // ace-101 与 ace-102 的四个字段逐字相同 → BM25 分数必然相等；ace-103 一个「重复」都不含 → 0 分。
+  const tie = [
+    E('ace-101', '重复 重复', '当清理重复条目时', '清理 重复 归档', ''),
+    E('ace-102', '重复 重复', '当清理重复条目时', '清理 重复 归档', ''),
+    E('ace-103', '超时 超时 超时', '当排查超时、要重跑时', '排查 超时 重跑', ''),
+  ];
+  const sc = scoreEntries(tie, '重复');
+  assert.equal(sc[0].score, sc[1].score, '两条同文条目必须同分（同分场景是真实存在的）');
+  assert.deepEqual(sc.map((x) => x.e.id), ['ace-101', 'ace-102', 'ace-103'], '同分按原下标在前，0 分排最后');
+  // 倒过来喂：同分两条也跟着倒过来 —— 证明兜底用的是「本次数组里的下标」，不是 id 或标题。
+  const rev = scoreEntries(tie.slice().reverse(), '重复');
+  assert.deepEqual(rev.map((x) => x.e.id), ['ace-102', 'ace-101', 'ace-103']);
+});
