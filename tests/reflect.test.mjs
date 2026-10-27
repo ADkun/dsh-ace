@@ -128,3 +128,51 @@ test('C3｜logger 畸形/缺失都不炸', async () => {
   await reflectRounds({ logger: { info: 'not a function' }, callRound: async () => [] });
   await reflectRounds({ logger: { get info() { throw new Error('boom'); } }, callRound: async () => [] });
 });
+
+test('C3｜第 39 轮：第 1 轮单次 LLM 超时也按「本轮放弃」收尾，不上抛', async () => {
+  // 单次调用超时（lib/llm.js 抛的 'ace: LLM 调用超时…'）只让这一轮放弃：
+  // 第 1 轮就超时也应返回 0 条候选 + aborted:true，而不是把整段复盘炸掉。
+  const logs = [];
+  const result = await reflectRounds({
+    logger: { info: (m) => logs.push(m) },
+    callRound: async () => { throw new Error('ace: LLM 调用超时（单次上限 75000ms）：The operation was aborted'); },
+  });
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.rounds, 0);
+  assert.equal(result.converged, false);
+  assert.equal(result.aborted, true, '超时必须标成 aborted（调用方据此走通知路径）');
+  assert.match(logs[0], /多轮复盘第 1 轮中断/);
+  assert.match(logs[0], /ace: LLM 调用超时/);
+});
+
+test('C3｜第 39 轮：超时只放弃那一轮，已提炼的候选仍按原样落盘', async () => {
+  const logs = [];
+  const result = await reflectRounds({
+    logger: { info: (m) => logs.push(m) },
+    callRound: async (round) => {
+      if (round === 1) return [{ title: 'A', condition: 'c', action: 'a', rationale: 'r' }];
+      throw new Error('ace: LLM 调用超时（单次上限 75000ms）：The operation was aborted');
+    },
+  });
+  assert.equal(result.candidates.length, 1, '第 1 轮已提炼的候选必须留下');
+  assert.equal(result.rounds, 1);
+  assert.equal(result.aborted, true);
+  assert.match(logs[1], /多轮复盘第 2 轮中断/);
+});
+
+test('C3｜第 39 轮：普通错误第 1 轮仍原样上抛（只吞超时，不吞真故障）', async () => {
+  await assert.rejects(
+    () => reflectRounds({ callRound: async () => { throw new Error('JSON 解析失败：模型输出不是对象'); } }),
+    /JSON 解析失败/,
+  );
+  // 超时标记出现在**中间**也不算（必须是开头）—— 防止别的错误被误判成超时吞掉。
+  await assert.rejects(
+    () => reflectRounds({ callRound: async () => { throw new Error('上游报错：ace: LLM 调用超时（单次上限 1ms）'); } }),
+    /上游报错/,
+  );
+  // 前缀本身没错、但**不是同一个词**的也不算（防止误吞语义不同的错误）。
+  await assert.rejects(
+    () => reflectRounds({ callRound: async () => { throw new Error('ace: LLM 调用被限流'); } }),
+    /被限流/,
+  );
+});

@@ -504,6 +504,64 @@ test('P1-6｜检索命中的等效动作（commitMeta + markHits）只动 hits�
   assert.equal(afterSearch.hits, 2, '检索命中要记 hits');
   assert.ok(STAMP_RE.test(afterSearch.lastHit), 'lastHit 是毫秒时间戳：' + afterSearch.lastHit);
   assert.deepEqual(ledger.peek(agent), [], '检索命中绝不许进回合账本（P1-6）');
+
+// —— 第 39 轮：abort 检查点（只放锁外；锁内绝不抛中断）——
+
+test('第39轮｜检查点①：读快照之前 abort → 不调 Reflector、手册一字不动', async () => {
+  const dir = await makeDir('abort-1');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [E('ace-001', '旧经验', '做法')]);
+  const before = await fs.readFile(file, 'utf8');
+  const controller = new AbortController();
+  controller.abort(new Error('复盘超过总时限'));
+  let reflectCalls = 0;
+  const { deps } = makeDeps(file, {
+    reflectRound: async () => { reflectCalls += 1; return []; },
+  });
+  await assert.rejects(
+    () => runRecapPipeline(deps, { agent: { name: 'test-agent' }, summary: 's', signal: controller.signal }),
+    /复盘超过总时限/,
+  );
+  assert.equal(reflectCalls, 0, 'abort 后不该再调 Reflector');
+  assert.equal(await fs.readFile(file, 'utf8'), before, 'abort 后手册必须一字未动');
+  await cleanup(dir);
+});
+
+test('第39轮｜检查点②：合并之前 abort → 一次合并 LLM 都不花、手册不动', async () => {
+  const dir = await makeDir('abort-2');
+  const file = path.join(dir, 'playbook.md');
+  // 满额：2 条 > 上限 1，逼出「先合并」路径（检查点②就在它前面）。
+  await writePlaybook(file, [SIMILAR_A, SIMILAR_B]);
+  const before = await fs.readFile(file, 'utf8');
+  const controller = new AbortController();
+  let mergeCalls = 0;
+  const { deps } = makeDeps(file, {
+    maxEntries: 1,
+    reflectRound: async () => [C('新的经验', '做法')],
+    mergeAsk: async () => { mergeCalls += 1; return MERGED_JSON; },
+  });
+  const pipeline = runRecapPipeline(deps, { agent: { name: 'test-agent' }, summary: 's', signal: controller.signal });
+  // Reflector 那一次 await 之后 abort：合并与落盘都还没开始。
+  await Promise.resolve();
+  controller.abort(new Error('复盘超过总时限'));
+  await assert.rejects(() => pipeline, /复盘超过总时限/);
+  assert.equal(mergeCalls, 0, 'abort 后不该再花合并 LLM 调用');
+  assert.equal(await fs.readFile(file, 'utf8'), before, 'abort 后手册必须一字未动（锁内没被中断）');
+  await cleanup(dir);
+});
+
+test('第39轮｜没有 signal 的旧调用方式照常工作（向后兼容）', async () => {
+  const dir = await makeDir('abort-none');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, []);
+  const { deps, seen } = makeDeps(file, { reflectRound: async () => [C('兼容性经验', '做法')] });
+  const out = await runRecapPipeline(deps, { agent: { name: 'test-agent' }, summary: 's' });
+  assert.equal(out.added.length, 1, '不传 signal 必须照常落盘');
+  assert.equal(seen.written.length, 1);
+  const parsed = await readPlaybook(file);
+  assert.ok(parsed.entries.some((e) => e.title === '兼容性经验'));
+  await cleanup(dir);
+});
   // 2) 随后一回合复盘：没有自动注入 → 命中计数不许再动
   await runRecapPipeline(deps, { agent, summary: '轨迹' });
   const afterRecap = (await readPlaybook(file)).entries[0].meta;

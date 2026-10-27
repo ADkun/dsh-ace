@@ -680,10 +680,213 @@ GET /api/dsh-ace/entries
 - 改淘汰顺序时：三级判据（`hits` 升序 → `created` 更早 → `idNumber`）是契约，**不许改成随机的、不许只按时间、不许引入任何分数或权重**；同分同秒必须由 id 兜底（tests/archive.test.mjs 守护用例①）；第 36 轮加的新条目保护期（`protectDays`）只许改「先取哪一组」，**绝不许让要腾出的 N 位变小**，也不许在「全都在保护期」时死锁——缺口一律用受保护组按同一全序补齐（tests/evict-protect.test.mjs 钉住）；
 - 改合并时：`planMerges` 必须**永不抛错**，调用方仍要保留自己的 try/catch；某对失败就换下一对，全部失败就直接淘汰腾位——**合并失败绝不许阻塞落盘**（tests/recap-pipeline.test.mjs 守护用例②）；第 37 轮起多一条：**adds > 0 且不满额时还会跑一次轻量合并**（阈值 0.75、最多 2 对，见 `MERGE_EAGER_*` 常量与 I11），它同样永不抛错、只 warn；改动时两套阈值与轮数都别动；
 - 改注入时：`lib/inject.js` 的排序键（**0.9 × 归一化相关度 + 0.1 × 归一化话题热度，同分按 id 数字升序**）与预算（`injectTokenBudget` 默认 900、`injectMaxEntries` 默认 5，常量仍作兜底默认）是契约；`hits` 绝不许进排序键；token 估算是**估算**，别把它当成精确计量去卡边界；**注入只许追加进历史（`agent/pre-step` 往 `decision.messages` 末尾插一条 user 消息），绝不许改写系统提示**——改前把注入渲染进 `ace-playbook` section，宿主原地重写首个系统节点，实测 cached 恒 8,320 tok、73 次切换累计重付 926.0K token；**注入块首行「最多 N 条」的 N 必须跟着生效配置走**（第 37 轮：经 `selectInjection` 的 `options.maxEntries` 透传给 `renderInjection`，未传/0/非法才回落常量），只改文案、不改取几条（I12）；
-- 改可观测时：只加内存计数器 + 一行 `dsh-ace: …` 日志，**不许为统计新增落盘文件**；新计数器要同时出现在 `runtimeSnapshot()` 与 `normalizeRuntime`（lib/stats.js）里，否则页面会显示 undefined；**页面只许渲染协议里真有的键**——第 34 轮删掉了设置页的「跳过 / 失败」两格：它们读的 `runtime.injectedSkipped` / `injectedFailed` 从来不在七键协议里，`num(undefined)` 兜成假 0，等于常年显示「一个数都没有」；计数器本体（`lib/index.js` 的 `skipped += 1` / `failed += 1`）保留、继续进日志，**但不许为了显示它们而给 runtime 加键**（七键是红线）；旧的计分计数器不许以任何形式加回来；
+- 改可观测时：只加内存计数器 + 一行 `dsh-ace: …` 日志，**不许为统计新增落盘文件**；新计数器要同时出现在 `runtimeSnapshot()` 与 `normalizeRuntime`（lib/stats.js）里，否则页面会显示 undefined；**页面只许渲染协议里真有的键**——第 34 轮删掉了设置页的「跳过 / 失败」两格：它们读的 `runtime.injectedSkipped` / `injectedFailed` 从来不在七键协议里，`num(undefined)` 兜成假 0，等于常年显示「一个数都没有」；计数器本体（`lib/index.js` 的 `skipped += 1` / `failed += 1`）保留、继续进日志，**但不许为了显示它们而给 runtime 加键**（七键是红线）；旧的计分计数器不许以任何形式加回来；**第 40 轮起多一条例外口径**：注入链路的诊断计数（`handled` / `earlyReturn` / `deliveries` / `failures` / `stall`）**不进 runtime 七键**，而是走 `injectionSnapshot()` 挂在 `/stats` 响应里一个**并列顶层键 `injection`** 上——它只给诊断用，页面不渲染它；要把它塞进七键就得同时改 `normalizeRuntime` 与页面，那是改协议、不是加计数；
 - 改时间戳时：`created`/`updated`/`lastHit` 一律走 `lib/timestamp.js` 的 `nowStamp`（毫秒精度本地 ISO），**排序用毫秒精度、界面只显示到日**——界面这一半由 `client.js` 的纯函数 `displayDay(value)` 兑现（`/^(\d{4})-(\d{2})-(\d{2})/` 取日期部分，认不出/空值一律 `'—'`），**设置页的所有渲染路径都必须走它**，不许再出现 `String(x.updated ?? '')` 直出（第 34 轮：29 字符毫秒戳塞进 84px 的日期列，且 `dayOf` 只给服务端统计落桶用）；旧日期格式必须照常解析，不许抛错；
 - 别动：`cordis.patch.yml` 的 id/name 配对；`inject` 数组只声明真正用到的服务。
 
 ## 测试与验证
 
 用例总表、运行方式与未验证清单见 [TESTING.md](TESTING.md)。
+
+## 第 39 轮：自动复盘加总时限与单次 LLM 超时（复盘不占宿主维护相位）
+
+用户症状：DSH 启动后从第二条消息起完全无响应，必须任务管理器结束 node.exe。根因链：
+宿主 `runMaintenance(job)` 在 job 返回前一直保持 `phase.kind === 'maintenance'`，而 `wakeDriver` 在非
+idle 相位只置 `wakeRequested` 就 return —— 复盘不结束，之后到达的用户消息永远排队。
+dsh-ace 的自动复盘最长 8 次串行 LLM 调用（3 轮复盘 + 5 轮满额合并），provider 静默时可达小时级。
+
+本轮改动（全部增量，未删既有代码）：
+
+- **复盘不占宿主维护相位**：`lib/index.js` 的 `runRecap` 不再调 `agent.runMaintenance`，改为入队
+  插件自己的串行队列后同步返回 `{ queued: true }`。宿主相位始终 idle，用户消息不再被复盘挡住。
+  （手动 `/ace` 复盘当时**仍**走 `runMaintenance`：用户显式触发、显式等待，不涉及消息到达 ——
+  **第 40 轮起此说不再成立**，手动 `/ace` 也改走同一条插件队列，见第 40 轮「缺陷 5」一节。）
+- **新增 `lib/recap-queue.js`（零 import）**：全局唯一复盘串行队列。
+  `RECAP_TOTAL_DEADLINE_MS = 120000`（90000–180000 的中值偏保守侧，与单次上限 75000 配比，
+  2 次单次调用即触顶）、`MAX_QUEUED_RECAPS = 2`。`enqueue(item, merge)` 支持把新回合并进
+  已在排队的那一份；`drain()` 用 `Promise.race([run(), deadline])`，到点**只放弃等待、不 abort 上游**
+  （宿主的 `abortedCancelCause` 对没有 `kind` 字段的 abort reason 会走 `assertNever` 抛错，
+  详见修复报告 5.1），并走 `onGiveUp` 通知用户「可重试」。
+- **单次 LLM 调用上限**：`lib/llm.js` 新增 `ONESHOT_TIMEOUT_MS = 75000`（比宿主 300000ms
+  stream idle 看门狗小一个数量级），`mergeSignals` 与调用方 signal 合并后透传给 `ctx.llm.stream`；
+  本地超时抛 `'ace: LLM 调用超时（单次上限 ...ms）'`。
+- **超时只放弃那一轮**：`lib/reflect.js` 的 `reflectRounds` catch 改为「只吞带
+  `ace: LLM 调用超时` 前缀的错误（第 1 轮也吞，按已提炼候选返回 aborted:true），普通错误仍原样上抛」。
+- **锁外 abort 检查点 ×3**：`lib/recap-pipeline.js` 在读快照前、合并 LLM 前、`commitOps` 前各一处
+  `signal?.throwIfAborted?.()`。**检查点绝不放进 `withExclusiveLock` / `commitOps` 内部**，
+  否则会破坏 `lib/commit.js` 的「先写 archive 再写手册」顺序。
+- **可观测**：复盘开始/结束/放弃/失败各一行 `dsh-ace: …` 日志（带 agent id、耗时、队列剩余）；
+  少一条配对日志即可一眼定罪卡死。
+- **测试**：`tests/recap-queue.test.mjs`（7 条，含最大并发恒为 1）、`tests/recap-hang.test.mjs`
+  （3 条，子进程驱动真 `lib/index.js`，假 provider 永不返回）、`tests/reflect.test.mjs` +3、
+  `tests/recap-pipeline.test.mjs` +3。改前 554/553/1skip → 改后 570/569/1skip，fail 0。
+- 测试可用 `ACE_RECAP_TOTAL_DEADLINE_MS` / `ACE_ONESHOT_TIMEOUT_MS` 覆盖两个常量
+  （模块级常量、import 时求值，故 e2e 类用例用子进程）。
+
+改这一层时的红线：**绝不 abort 宿主的任何 signal**（无 `kind` 的 reason 会让宿主 finally 抛
+`assertNever`，把 `whenIdle()` 永久挂死）；**锁内绝不抛中断**；**不引入 npm 依赖**；
+**不新增定时器之外的后台任务**（队列的 `setTimeout` 一律 `unref()`）。
+
+## 第 40 轮：注入链路的可观测性、接缝顺序、手动复盘并入队列与队列丢弃通知
+
+背景：dsh-ace 的经验注入自 2026-10-26T14:03:02.375Z 之后全库一次都没再发生过（1563 个会话里真注入只有 57 次，
+最后一次就是那一刻）。已排查确认检索/选型/去重/投递四层纯函数与装配面都正常，失效只剩三种可能：
+**handler 根本没被调用 / handler 被门槛早退 / IIFE 抛错进了 catch**。改前没有任何计数能区分这三种。
+
+### R1：把「没被调用」「被早退」「抛错」拆成可区分的计数
+
+`lib/index.js` 的 `injectionStats` 在原有 `{batches, appended, skipped, failed}` 之上增加三层：
+
+| 层 | 键 | 语义 |
+| --- | --- | --- |
+| 进入 | `handled` / `preSteps` | inbox 预检索 handler 进入次数（**在任何早退之前 +1**）/ pre-step 投递订阅进入次数 |
+| 早退 | `earlyReturn.by.{noAgent, notUser, flagsOff, cacheHit, noQuery}`（预检索侧）与 `{notEnter, noAgent, subAgent, noAgentPicked, noText}`（投递侧），第 41 轮再加 `downstreamThrew` | 每个早退分支各自一桶，别的分支不会替它计数 |
+| 失败 | `failures.{prerecall, empty, deliver}` + `deliveries`，第 41 轮再加 `failures.next` | 三处静默失败点（预检索 IIFE catch / 选不出候选 / 投递 catch）各自 +1；`deliveries` 是 pre-step 真把经验追加进历史的次数；`failures.next` 是「接缝到了、但下游 pre-step 监听器在 `next()` 里抛错」（错误照旧原样上抛，不吞） |
+
+第 41 轮补的两条读法：`preSteps === 0` ⇒ **投递接缝根本没被宿主调用过**（删掉这一行增长点曾
+没有任何测试会变红）；`failures.next > 0` ⇒ 接缝到了但下游炸了。另加两个内存时间戳
+`lastPublishAt` / `lastDeliveryAt`（毫秒本地 ISO，空串 = 本进程还没有过）——
+只有累计数时答不出「注入是从哪一刻停的」，而这正是当初排查停发最缺的信息。
+
+**判定口径（写进 `lib/index.js` 的注释，也是这一层存在的理由）**：
+`handled > 0 && batches === 0` ⇒ handler 被调用了但没产出（往 earlyReturn 分桶里看是哪道门）；
+`handled === 0` ⇒ 事件根本没到 handler（装配/宿主侧问题，不是插件逻辑问题）；
+`deliveries === 0 && batches > 0` ⇒ 检索发出了批次但投递层一次没成功。
+第 43 轮改口径表述（**表达式一字未动**，第 42 轮那句「`stalled` 与 R5 的 `noProduce` 同口径」
+是**过度承诺**，已删）：`stalled` 的准确语义只有一个 —— **「本进程里注入 handler 被调用过，
+但自进程启动以来从未成功产出过任何批次」**，即「注入链路从启动起就完全没工作」这条判据。
+`batches` 是**进程累计**，一旦成功发过一批就再也回不到 0，所以这一位答的是「链路有没有工作过」，
+**答不了**「某个 agent 最近是不是连续失败」—— 后者归 R5 的 `stall.noProduce` + notice 管。
+两者口径不同，**可以、也允许不同向**（第 43 轮用例钉死：同一个 agent 先成功发布过一批、
+随后连续 5 次无产出 ⇒ `stalled === false` 而 `stall.noProduce === 5`）。**这是刻意的分工，
+不是自相矛盾**：一位回答「链路活着吗」，另一位回答「这个 agent 卡住了吗」。
+
+唯一保留的口径微调（第 42 轮中-1）：当
+`earlyReturn.by.flagsOff === handled`（每一条都在 flagsOff 早退，即用户在设置里关了自动复盘/自动反思）
+时**不算 stalled**：那种情形「没产出」是「没开」，不是「链路失效」。旧口径下用户一关开关 `stalled`
+就为真，而同份统计里的 `stall.noProduce` 是 0，那种组合才是真的自相矛盾。
+
+**读法**：`GET /api/dsh-ace/stats` 的响应里多一个**并列顶层键 `injection`**（`injectionSnapshot()`，
+含机器可读的 `stalled` / `undelivered` 两个布尔 —— `stalled` = 「链路自启动起从未成功产出过任何批次」
+（**不是**「某 agent 连续失败」，那归 R5），`flagsOff` 全占时不报 stalled）。
+**不进 `runtime` 七键** —— 七键是红线，
+lib/stats.js 的 `normalizeRuntime` 与 client.js 的渲染都按精确七键钉死。
+全部只在内存，**没有新增任何落盘文件**（红线 9）。
+
+### R2：两条注入接缝上移到最前，并打一次性开机日志
+
+两条注入订阅（`agent/inbox/inserted` 预检索、`agent/pre-step` 投递）原本挂在 `recapController` 装配之后；
+现在上移到 `ctx.systemPrompt.section(...)` 之后、自动复盘段之前，**保证「section 在 ⇒ 注入 handler 也在」**
+——若哪天再出现「section 在渲染、注入却一次没发生」，可以直接排除「handler 没挂上」这一种。
+apply 尾部另打一行一次性开机日志：
+`dsh-ace: 注入接缝已挂载（inbox handler + pre-step delivery）；autoRecap=开/关 autoReflect=开/关`。
+事件注册顺序由 tests/wiring.test.mjs 的顺序断言钉住。
+
+### R5：连续无产出自检
+
+两个**连续**计数器 `noProduce` / `deliverySilent`（第 41 轮起**按 agent 分表**，见下）：
+预检索「**挑不出候选 / IIFE 抛错**」发生 `noProduce += 1`，发布成功就清零；
+投递失败 `deliverySilent += 1`，投递成功就清零。
+在 `agent/turn-stopping` 里由 `checkInjectionStall` 检查，达到 `INJECT_STALL_THRESHOLD = 5`（唯一常量）时
+**先清零再发**一条 `form==='notice'` 的通知（「ACE 注入链路可能已失效：连续 N 次**预检索**……」），
+并配一行 `dsh-ace: 注入链路自检——……已发一次性通知` 的 warn。整体 try/catch 吞错：
+通知发不出去也绝不许影响回合边界。
+
+第 41 轮修正三处口径（审计风险 2 / 3，三条都曾无测试可钉）：
+
+- **按 agent 分表**：`stallByAgent: Map<agentKey, {noProduce, deliverySilent}>`。旧口径是进程级全局，
+  A 的失败账记到 B 头上（PROBE-D 实测 A 错 3 + B 错 2 ⇒ A 收到「连续 5 次」）。/stats 的
+  `injection.stall` 报**最接近门槛**那个 agent 的数并附 `agents` 入表数；用 Map 而非 WeakMap 正是
+  因为这个数要算得出来。
+  **第 42 轮修正两处**：① 键优先取 `'id:' + agent.id`（宿主的稳定会话标识，见
+  `@deepseek-ai/dsh-agent/lib/types/types.d.ts` 的 `readonly id: SessionId`），没有 id 才退回对象
+  身份 —— 原来一律用对象身份，等于依赖「宿主两个事件传同一个对象引用」这条**未声明契约**
+  （审计 PB4：换成按事件新建的包装对象后 `agents = 2 / notices = 0`，R5 静默失效）；
+  ② `STALL_AGENT_CAP = 200` 超限时按**连续计数升序**挑受害者（**第 43 轮改写**；第 42 轮那版
+  「优先丢计数值全是 0 的条目、真找不到才丢最早入表者」**已作废**）：计分 = `noProduce + deliverySilent`，
+  先丢计分最小的那本；**计分相同时丢最早入表者**（Map 插入序 ⇒ 确定，**绝不随机**，红线 11）。
+  零值账（计分 0）因此最先被回收（丢空账、静默、无可损失）。但**不保证「绝不动正在连错的账」**：
+  全表 200 本计分都非零时，丢的是**全表计分最小**的那本，它完全可能已经连错了几次、只差一两次到
+  门槛 —— 第 44 轮审计 probe-cap 就是这个反例（全表 200 本计分都 = 4、谁都没到门槛 5，最早入表且
+  最该继续数的那本照样被丢）。这种情况**必留一行 warn 点名**（说清丢了哪个 agent、它当时的计数、
+  后果是「之后的连续失败要重新数到 5 次才会报警」）；计分为 0 才静默。措辞一律以「审计能不能用反例
+  证伪」为准绳 —— 这里能被证伪的只有「绝不动正在连错的账」这类绝对话，已删。
+  **为什么第 42 轮那版不够**（第 43 轮审计实测）：表里一条零值账都没有时，最早入表且已连错 4 次的
+  那本照样被丢，该 agent 新账从 0 重新数、第 5 次失败 `notices = 0` —— 与 PB3b 终态完全一致，
+  只是触发条件从「装满 200 本账」收窄成「装满 200 本非零账」。改成全表最小计分之后，被丢的恒是
+  「最不接近门槛的那本」。用例：tests/inject-observability.test.mjs 的 R5 四条（全非零账时连错最多者
+  不被丢 / 有零值账先丢零值 / 同分丢最早入表者 / 被丢的非零账确实留了点名 warn）。
+- **门槛早退不计 `noProduce`**：`noAgent / notUser / flagsOff / cacheHit / noQuery` 只进 earlyReturn 分桶。
+  用户在设置里关掉自动功能时六次全命中 `flagsOff`，旧口径下必然误报「链路可能已失效」（PROBE-1）。
+- **文案与实现相符**：说「连续 N 次**预检索**」而不是「N 次用户消息」（计数单位是预检索次数，
+  一个回合可能走好几次）；并加一句「若你在设置里关掉了注入 / 自动复盘，这条属于正常，可忽略」。
+
+### 缺陷 5：手动 `/ace` 复盘不再占宿主维护相位
+
+宿主 `runMaintenance(job)` 在 job 返回前一直保持 `phase.kind === 'maintenance'`，而 `wakeDriver` 在非 idle 相位
+只把新消息 latch 成 `wakeRequested` 就 return —— 这就是「发消息没反应」。第 39 轮只把**自动**复盘改出了这个相位，
+**手动** `/ace` 与 `ace_curate` 仍在里面。第 40 轮把手动路径也改走 `lib/recap-queue.js` 同一条串行队列：
+`enqueue(...)` → `drain()` → 靠 `onSettled` 拿回 outcome 再答复。四条返回值语义不变，判据换成队列：
+完成 / `agent 正在忙`（`recapQueue.busy`，**不再**用宿主的 `isBusyError`）/ 复盘失败 / 没有可用的 agent。
+手动路径**刻意不挂** `onGiveUp`/`onFailed`：用户就站在命令前面等结果，自动复盘那两条通知在这里只是噪音。
+
+### 缺陷 6：队列满额不再静默丢经验
+
+`lib/recap-queue.js` 的 `enqueue(item, merge)` 一直支持合并，但生产里的调用**没传 merge 回调**，
+合并分支是死代码 ⇒ 队列涨到 `MAX_QUEUED_RECAPS = 2` 就 `shift()` 掉最旧的一份，且**没有任何人被告知**。
+修法两条：① `lib/index.js` 真传 `mergeRecapItems`（label 记成「回合 2+3」、`run` 换成两份摘要一起喂同一条流水线、
+两份摘要各分半份 `TRAJECTORY_DEFAULTS.maxChars` 预算、`onGiveUp`/`onFailed` 两份都调）；
+② 丢弃分支走 `item.onDrop` → 复用 `form==='notice'` 通道发一次性通知，文案说真话：
+「ACE 自动复盘已丢弃一轮经验：<原因>。这份经验这次没有并入手册，下一次回合结束时会重新判定、重新攒，可照常继续工作。」
+
+**`mergedOnce` 上限（一份待跑项最多吸收一个回合）**：没有它的话，只要队列里还排着一项，后来的每一份都会并进去
+⇒ `queue.length >= maxQueued` 永远不可达 ⇒ 上面那条丢弃通知在生产里**永远发不出来**，且摘要链式拼接会越裁越碎
+直到顶爆喂料上限。上限 1 之后：合并仍是常态（不排长队、不丢经验），只有连续多份挤在同一窗口才真排队，
+排满了才丢最旧并通知 —— 那时文案说的才是真发生的事。
+队列的收尾契约同时收紧为「**每一次入队的项都恰好 settle 一次**」（成功 / 超时放弃 / 真失败 / 被丢弃 / 被合并件带着两方回调一起）。
+
+### 缺陷 4：归档成功、手册没写成功 —— 改对账自愈，锁内顺序一字未动
+
+`lib/commit.js` 写盘顺序是硬红线：**先 `appendArchivedEntries` 写 archive.md，再 `writeFileAtomic` 写手册**。
+反过来的话，一旦手册写失败，条目会从两边一起消失＝物理删除。但顺序正确的代价是：**归档写成功、手册写失败**时，
+手册活跃区里还列着那条已经归档的条目，下一轮复盘会把它再归档一次（重复归档）。
+
+修法**不是**「写失败后回写活跃区」（在写盘已经 EPERM 之后再做第二次写盘，只会连环失败且无法回报），
+而是**下一次提交在锁内对账自愈**：依据红线 13 的单向契约「归档条目只存在于 archive.md，手册活跃区里永远不出现它」，
+把「归档里已有、活跃区还列着」的条目从活跃区摘掉，并打一行 `dsh-ace:` warn 说明错位来源。
+条目正文仍在 archive.md ⇒ 不违反红线 7（归档永不物理删除），同一条 id 也不会再被归档一次。
+`commitOps` 与 `commitCapacity` 两条提交路径同口径；归档文件读不出来时既不摘也不写（与改前一致）。
+第 43 轮起读失败的那行 warn **按路径去重**（`lib/commit.js` 的 `warnArchiveReadFailure` + 模块级
+`ARCHIVE_READ_WARNED`）：归档长期不可读时每次提交都打同一句话只会刷屏，现在同一路径只 warn 一次。
+去重表是**纯内存**（进程重启即清空），**没有新增任何落盘文件**（红线 9）；清空 archiveEntries /
+archiveText、不阻断提交这些控制流一字未动。
+**已知边界（第 44 轮审计 probe-e4 实测，如实记下、不改行为）**：去重表是模块级的、**永不清空**，
+所以同一个归档路径走完「读失败 → 恢复可读 → 再次失败」之后**不会再告警**（实测该路径的 warns 恒为 1），
+第二次坏掉时只有提交静默跳过对账。取舍理由：清空表的时机只能是「读成功一次」，那会让「时好时坏的盘」
+每次都重新刷屏；而放宽到「按失败次数阈值」又要新增内存状态与阈值口径，收益不抵复杂度。进程重启即恢复告警。
+**死代码披露**：`warnArchiveReadFailure` 里的 `keyed = … : null` 这条 null 分支在**现有两个调用点不可达** —— 
+两处传入的 `archiveFile` 都已被 `commitOps` / `commitCapacity` 开头的归一化折成「非空字符串或空串」，而空串时根本走不进读归档的
+try 块（`if (archiveFile)` 先挡掉了），所以 `keyed` 永远是非空字符串。保留它是为了万一将来有第三个调用点
+传进 `null`/`URL` 对象时不会静默丢去重或抛错（那是「每次 warn」的退化，不是崩溃）。
+
+**已知取舍：空行差异不算差异，代价是活跃区独有的空行可能被静默丢（第 43 轮写明，第 42 轮审计低-2 实测）**：
+对账比对 `extraLines` 时**只看非空行**（`lib/commit.js` 的 `sameBody`，两侧都 `.filter((l) => String(l).trim() !== '')`）。
+代价：两侧 `extraLines` **只在空行上有差异**时会被判「一致」，活跃区那条独有的空行被静默丢掉、无 warn，
+走的是「正文完全一致」的自愈路径。这是**刻意付的代价** —— 解析器把条目块之间的空行、文件末尾的空行
+也当成「无法识别的行」塞进 `extraLines`（`lib/entry-format.js:175` 的 `cur.extraLines.push(line)` 兜底分支，
+`:189` 又逐行原样写回），而手写手册里那些空行**永远不会**在插件序列化出来的归档文件里同时出现，
+所以**裸比（按换行连接后逐字比）会让既有的 j1 / j3 / j7 / j8 四条真错位用例全红**
+（tests/archive.test.mjs:748 / 847 / 1052 / 1102；第 42 轮审计 mut-njoin 实测 pass 34 / fail 4）——
+「归档写成功、手册写失败」这条自愈路径会被废掉，同一批错位永久留盘。空行不承载任何人手批注
+（批注必有非空文本），舍它换「真错位能自愈」是划算的。**判定逻辑一行未改**（`git diff lib/commit.js` 的
+`sameBody` 空白处理与第 42 轮完全一致，本轮只动了文件头注释。**第 44 轮审计再次双证：树内 `sameBody` 与第 42 轮副本逐字相同（IDENTICAL=true），本条取舍未动逻辑。**）
+
+### 这轮的测试与未验证
+
+新增 `tests/inject-observability.test.mjs`（8 条：R1 六条 + R5 两条）与 `tests/recap-manual.test.mjs`
+（4 条：缺陷 5 两条 + 缺陷 6 两条），`tests/archive.test.mjs` 加 j1/j2 两条（缺陷 4）。
+全量 591 / pass 590 / fail 0 / skipped 1（改前 577）。
+
+**未验证**：没有在真实 DSH 宿主上端到端跑过任何一条；`injection.handled` 在真机上是否为 0（即失效根因到底是哪一种）
+需要真实实例读 `/api/dsh-ace/stats` 才能坐实，本轮没做（不许重启 DSH）；缺陷 4 的 EPERM 没有真复现成「跨两次提交」的因果链；
+`mergedOnce` 上限对真实复盘节奏的影响、`/ace` 新文案在真实交互里的呈现、notice 在真宿主里会不会被用户看到，都没测。

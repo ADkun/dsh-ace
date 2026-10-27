@@ -729,3 +729,527 @@ test('i2｜建议修6：淘汰计划返回不可用结果（不是数组）→ �
   assert.ok(logs.some((m) => m.includes('兜底')));
   await cleanup(dir);
 });
+
+// —— j：缺陷 4（第 40 轮）——「归档写成功、手册写失败」留下的错位必须自愈 ——
+//
+// 现场（lib/commit.js:246-249 与 :333-334）：锁内顺序是「先 appendArchivedEntries 写 archive.md，
+// 再 writeFileAtomic 写手册」。手册那一步真失败之后，盘上留下的是错位 —— 归档文件说它已经归档，
+// 手册活跃区还列着它。后果有两个：下一轮复盘会把它**再归档一次**（重复归档），人也分不清哪边是真的。
+//
+// 修法没有动锁内顺序（红线：先归档、后手册）。用的是红线 13 的单向契约：归档条目只存在于
+// archive.md，手册活跃区里**永远不出现**它。归档是先写的那一份、是既成事实，所以下一次提交在锁内
+// 把「归档里已经有、活跃区还列着」的条目从活跃区摘掉；条目正文仍在 archive.md 里，
+// 一条都没有被物理删除（红线 7），同一条 id 也不会再被归档一次。自愈动作必须留一行 dsh-ace 日志（红线 9）。
+//
+// 错位怎么造：archive.md 里先写好同 id 的归档条目，手册里仍列着它 —— 这正是手册写失败之后的盘上状态。
+// 这里不真实复现 EPERM：占住手册文件会让 writeFileAtomic 连临时文件 rename 都失败（见
+// tests/playbook.test.mjs:468-497），那样只会测到「整体抛错」，测不到「下一次提交自愈」。
+
+test('j1｜缺陷4：归档里已有、手册活跃区还列着的错位条目 → 下一次 commitOps 把它从活跃区摘掉（不重复归档、不物理删除）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-dup-archive-ops-'));
+  const file = path.join(dir, 'playbook.md');
+  const archiveFile = path.join(dir, 'archive.md');
+  await fs.writeFile(file, [
+    '# ACE 操作手册', '',
+    ...mdBody('ace-001', '还在用的条', 5, '2026-01-01T00:00:00.000+08:00'),
+    ...mdBody('ace-002', '已经进归档的条', 1, '2026-06-01T00:00:00.000+08:00'),
+  ].join('\n') + '\n', 'utf8');
+  // 归档里已经有完整的 ace-002（＝那一次手册写失败留下的既成事实）。
+  await appendArchivedEntries(archiveFile, [{
+    id: 'ace-002',
+    title: '已经进归档的条',
+    condition: 'c-ace-002',
+    action: 'a-ace-002',
+    rationale: '',
+    meta: { created: '2026-06-01T00:00:00.000+08:00', updated: '2026-06-01T00:00:00.000+08:00', hits: 1, lastHit: '' },
+    archive: { reason: 'evicted', date: EVICT_STAMP, supersededBy: '' },
+  }], { highWater: 2 });
+  const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(snapshot.entries.map((e) => e.id), ['ace-001', 'ace-002'], '起手手册活跃区还列着已归档的 ace-002');
+  assert.equal((await readArchiveSnapshot(archiveFile)).entries.length, 1, '起手归档里已经有一条');
+
+  const logs = [];
+  const out = await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目', condition: 'c9', action: 'a9' }], 5, {
+    archiveFile, today: EVICT_STAMP, logger: { warn: (m) => logs.push(m) },
+  });
+
+  // ① 错位被摘掉：活跃区不再出现 ace-002，本批候选照常落盘。
+  const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-003'], '已归档的 ace-002 必须从活跃区摘掉，候选照常落盘');
+  // ② 不重复归档：归档里还是只有一条 ace-002，正文是原来那一份。
+  const archiveAfter = (await readArchiveSnapshot(archiveFile)).entries;
+  assert.equal(archiveAfter.length, 1, '归档里不许再多出一条 ace-002（不重复归档）');
+  assert.equal(archiveAfter[0].id, 'ace-002');
+  assert.equal(archiveAfter[0].condition, 'c-ace-002', '归档里那条的正文必须原样还在');
+  // ③ 不物理删除：正文在归档文件里，且只有一份（红线 7 / 13）。
+  const archiveText = await fs.readFile(archiveFile, 'utf8');
+  const hits = archiveText.match(/###\s*\[?ace-002\]?\s*已经进归档的条/g) || [];
+  assert.equal(hits.length, 1, '归档里 ace-002 的正文必须还在且只有一份：' + JSON.stringify(hits));
+  // ④ 本次没有被「再归档」一次：result.archived 里不出现 ace-002。
+  assert.deepEqual((out.result.archived || []).map((a) => a.id), [], '同一条 id 不许再被归档一次');
+  // ⑤ 红线 9：自愈动作有一行 dsh-ace 日志，人能看出发生过什么。
+  assert.ok(
+    logs.some((m) => m.includes('dsh-ace:') && m.includes('ace-002')),
+    '自愈必须留一行 dsh-ace 日志：' + JSON.stringify(logs),
+  );
+  await cleanup(dir);
+});
+
+test('j2｜缺陷4：同一种错位在 commitCapacity 上也必须自愈（0 候选回合的腾位路径）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-dup-archive-cap-'));
+  const file = path.join(dir, 'playbook.md');
+  const archiveFile = path.join(dir, 'archive.md');
+  await fs.writeFile(file, [
+    '# ACE 操作手册', '',
+    ...mdBody('ace-001', '命中 9 次', 9, '2026-01-01T00:00:00.000+08:00'),
+    ...mdBody('ace-002', '已经进归档的条', 0, '2026-02-01T00:00:00.000+08:00'),
+    ...mdBody('ace-003', '还在用的条', 4, '2026-03-01T00:00:00.000+08:00'),
+  ].join('\n') + '\n', 'utf8');
+  await appendArchivedEntries(archiveFile, [{
+    id: 'ace-002',
+    title: '已经进归档的条',
+    condition: 'c-ace-002',
+    action: 'a-ace-002',
+    rationale: '',
+    meta: { created: '2026-02-01T00:00:00.000+08:00', updated: '2026-02-01T00:00:00.000+08:00', hits: 0, lastHit: '' },
+    archive: { reason: 'evicted', date: EVICT_STAMP, supersededBy: '' },
+  }], { highWater: 3 });
+  const before = await fs.readFile(file, 'utf8');
+  assert.ok(before.includes('ace-002'), '起手手册里还列着已归档的 ace-002');
+
+  const logs = [];
+  const out = await commitCapacity(file, {
+    archiveFile, maxEntries: 2, evict: planEvictions, today: EVICT_STAMP, logger: { warn: (m) => logs.push(m) },
+  });
+
+  const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-003'], '错位条目必须被摘掉（摘掉后正好回到 maxEntries=2，无需再淘汰）');
+  assert.deepEqual((out.archived || []).map((a) => a.id), [], '摘掉错位不算一次归档动作，不许再往归档里写一遍');
+  assert.equal((await readArchiveSnapshot(archiveFile)).entries.length, 1, '归档里仍只有原来那一条');
+  assert.ok(
+    logs.some((m) => m.includes('dsh-ace:') && m.includes('ace-002')),
+    '腾位路径的自愈同样要留一行 dsh-ace 日志：' + JSON.stringify(logs),
+  );
+  await cleanup(dir);
+});
+
+// —— j3 / j4：对账口径只认「id + 正文全同」（第 41 轮，审计风险 1）——
+//
+// 症状：j1/j2 的对账只按 **id** 匹配。archive.md 里若存在同 id 但正文不同的条目
+// （手工编辑 / 编号复用 / 旧快照覆盖），活跃区那一条的正文会被**物理抹掉** ——
+// 归档里躺着的是另一份正文，盘上任何文件都不再有活跃区那一份，而对外承诺是
+// 「一条都没丢」。审计用 work/m12c.mjs 实测到过这个反例（BEFORE/AFTER 原文对得上）。
+//
+// 修法：只有「id 相同 **且** title/condition/action/rationale 全同」才摘（那是真正的
+// 「归档写成功、手册写失败」错位）；同 id 正文不同的一律**保留活跃区那条**并 warn。
+// 下面两条用例把两个方向同时钉住：真错位照摘、正文不同的绝不摘。
+
+test('j3｜缺陷4（第 41 轮）：archive.md 里同 id 但正文不同的条目绝不许把活跃区那份正文抹掉（正文不同的保留 + warn，正文一致的真错位照摘）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-misalign-ops-'));
+  const file = path.join(dir, 'playbook.md');
+  const archiveFile = path.join(dir, 'archive.md');
+  const STAMP = '2026-10-24T09:00:00.000+08:00';
+  const body = (id, title, condition, action) => [
+    '### [' + id + '] ' + title,
+    '- 条件：' + condition,
+    '- 做法：' + action,
+    '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=1 lastHit=',
+    '',
+  ];
+  await fs.writeFile(file, [
+    '# ACE 操作手册', '',
+    ...body('ace-001', '无关条目', 'c-a1', 'a-a1'),
+    // ← 活跃区这份：正文是 c-NEW-ACTIVE（模拟「人在归档之后又改过这一条」）。
+    ...body('ace-002', '同 id 异正文', 'c-NEW-ACTIVE', 'a-NEW-ACTIVE'),
+    // ← 这一条是真的错位：归档里那份与它逐字相同（id + 正文全同）。
+    ...body('ace-003', '真错位', 'c-SAME', 'a-SAME'),
+  ].join('\n') + '\n', 'utf8');
+  await appendArchivedEntries(archiveFile, [
+    {
+      id: 'ace-002', title: '同 id 异正文', condition: 'c-OLD-ARCHIVED', action: 'a-OLD-ARCHIVED', rationale: '',
+      meta: { created: STAMP, updated: STAMP, hits: 1, lastHit: '' },
+      archive: { reason: 'evicted', date: STAMP, supersededBy: '' },
+    },
+    {
+      id: 'ace-003', title: '真错位', condition: 'c-SAME', action: 'a-SAME', rationale: '',
+      meta: { created: STAMP, updated: STAMP, hits: 1, lastHit: '' },
+      archive: { reason: 'evicted', date: STAMP, supersededBy: '' },
+    },
+  ], { highWater: 3 });
+  const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+
+  const logs = [];
+  const out = await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目', condition: 'c9', action: 'a9' }], 10, {
+    archiveFile, today: STAMP, logger: { warn: (m) => logs.push(String(m)) },
+  });
+
+  const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+  const activeText = await fs.readFile(file, 'utf8');
+  const archived = (await readArchiveSnapshot(archiveFile)).entries;
+
+  // ① 正文不同那条：活跃区这份**一个字都不许少**（这正是被抹掉的那份）。
+  const activeTwo = parsed.entries.find((e) => e.id === 'ace-002');
+  assert.ok(activeTwo, '同 id 但正文不同的条目必须留在活跃区：' + JSON.stringify(parsed.entries.map((e) => e.id)));
+  assert.equal(activeTwo.condition, 'c-NEW-ACTIVE', '活跃区那份正文必须原样保留（旧口径会把它物理抹掉）');
+  assert.equal(activeTwo.action, 'a-NEW-ACTIVE');
+  // ② 盘上两个文件里两份正文**同时**存在 —— 「一条都没丢」这句话才是真的。
+  assert.ok(activeText.includes('c-NEW-ACTIVE'), '活跃区那份正文必须还在某个盘上文件里');
+  const archiveText = await fs.readFile(archiveFile, 'utf8');
+  assert.ok(archiveText.includes('c-OLD-ARCHIVED'), '归档里那份正文也不许动');
+  // ③ 正文一致的真错位照旧摘掉（收紧口径不是为了把真错位也放走），本批候选照常落盘。
+  assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-002', 'ace-004'], '真错位 ace-003 摘掉、候选落盘、正文不同的 ace-002 保留');
+  assert.equal(activeText.includes('c-SAME'), false, '真错位的正文与归档逐字相同，摘掉不丢任何东西');
+  // ④ 归档侧一条都不许多、不许动。
+  assert.deepEqual(archived.map((e) => e.id).sort(), ['ace-002', 'ace-003'], '归档里仍是那两条（不重复归档）');
+  assert.equal(archived.find((e) => e.id === 'ace-002').condition, 'c-OLD-ARCHIVED');
+  assert.deepEqual((out.result.archived || []).map((a) => a.id), [], '本次没有任何「再归档」动作');
+  // ⑤ 两条 warn 各自说清发生了什么 —— 一句都不能少，否则人查不到正文去哪了。
+  const misWarn = logs.find((m) => m.includes('同 id 但正文不同'));
+  assert.ok(misWarn, '正文不同必须留一行 warn（这是「为什么活跃区那条没被摘」的唯一线索）：' + JSON.stringify(logs));
+  assert.ok(misWarn.includes('ace-002'), 'warn 必须点名是哪条 id：' + misWarn);
+  assert.ok(misWarn.includes('未摘除活跃区那条') && misWarn.includes('请人工确认'), 'warn 必须说明「保留了活跃区那条、请人工确认」：' + misWarn);
+  const staleWarn = logs.find((m) => m.includes('正文完全一致'));
+  assert.ok(staleWarn && staleWarn.includes('ace-003'), '真错位被摘时同样要留一行 dsh-ace 日志：' + JSON.stringify(logs));
+  await cleanup(dir);
+});
+
+test('j4｜缺陷4（第 41 轮）：commitCapacity 同样只摘「id + 正文全同」的错位，正文不同的保留在活跃区', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-misalign-cap-'));
+  const file = path.join(dir, 'playbook.md');
+  const archiveFile = path.join(dir, 'archive.md');
+  const STAMP = '2026-10-24T09:00:00.000+08:00';
+  const body = (id, title, hits, condition, action) => [
+    '### [' + id + '] ' + title,
+    '- 条件：' + condition,
+    '- 做法：' + action,
+    '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=' + hits + ' lastHit=',
+    '',
+  ];
+  await fs.writeFile(file, [
+    '# ACE 操作手册', '',
+    ...body('ace-001', '命中最多', 9, 'c-a1', 'a-a1'),
+    ...body('ace-002', '真错位', 0, 'c-SAME', 'a-SAME'),
+    ...body('ace-003', '同 id 异正文', 4, 'c-NEW-ACTIVE', 'a-NEW-ACTIVE'),
+  ].join('\n') + '\n', 'utf8');
+  await appendArchivedEntries(archiveFile, [
+    {
+      id: 'ace-002', title: '真错位', condition: 'c-SAME', action: 'a-SAME', rationale: '',
+      meta: { created: STAMP, updated: STAMP, hits: 0, lastHit: '' },
+      archive: { reason: 'evicted', date: STAMP, supersededBy: '' },
+    },
+    {
+      id: 'ace-003', title: '同 id 异正文', condition: 'c-OLD-ARCHIVED', action: 'a-OLD-ARCHIVED', rationale: '',
+      meta: { created: STAMP, updated: STAMP, hits: 4, lastHit: '' },
+      archive: { reason: 'evicted', date: STAMP, supersededBy: '' },
+    },
+  ], { highWater: 3 });
+
+  const logs = [];
+  await commitCapacity(file, {
+    archiveFile, maxEntries: 3, evict: planEvictions, today: STAMP, logger: { warn: (m) => logs.push(String(m)) },
+  });
+
+  const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-003'], '真错位 ace-002 摘掉、正文不同的 ace-003 保留');
+  assert.equal(parsed.entries.find((e) => e.id === 'ace-003').condition, 'c-NEW-ACTIVE', '活跃区那份正文必须原样保留');
+  assert.ok((await fs.readFile(file, 'utf8')).includes('c-NEW-ACTIVE'), '活跃区正文仍在盘上');
+  assert.ok((await fs.readFile(archiveFile, 'utf8')).includes('c-OLD-ARCHIVED'), '归档那份也没被动过');
+  assert.equal((await readArchiveSnapshot(archiveFile)).entries.length, 2, '归档里仍是那两条（摘错位不算一次归档）');
+  assert.ok(
+    logs.some((m) => m.includes('同 id 但正文不同') && m.includes('ace-003') && m.includes('请人工确认')),
+    '腾位路径同样要留一行「未摘除活跃区那条」的 warn：' + JSON.stringify(logs),
+  );
+  await cleanup(dir);
+});
+
+// —— j5 / j6 / j7 / j8 / j9：第 42 轮对账口径补丁（审计 audit2.md 高-1 / 低-1 / 低-2 / 低-3）——
+//
+// 高-1（审计 CASE 8 实测）：sameBody 只比四个正文字段，extraLines（人手批注）没进比对 ⇒ 同 id +
+// 四字段全同 + 只有批注不同时被判「一致」，活跃区那条被当错位摘掉，而归档里那份**没有**活跃区
+// 独有的批注 ⇒ 批注在手册与归档里同时消失、且没有任何 warn。lib/playbook.js:15 的原话是
+// 「条目内无法识别的行挂在该条目的 extraLines 上原样保留（人手编辑的批注不丢失）」。
+// 修法：extraLines 也进 sameBody（两边换行连接后逐字比），不等就走既有的 conflict 路径（保留活跃区那条 + warn）。
+//
+// 低-1：writeEntryBlock 把空 condition/action 落盘成占位符（未注明）⇒ 活跃区空串与归档侧（未注明）
+// 在**同一性**上是同一份正文，旧写法按字符串比会误判 conflict。先证明两者序列化逐字相同（j6），再归一化比（j7）。
+//
+// 低-3：同 id 在归档里出现多条时旧写法 byId.set 只认最后一条 ⇒ 活跃区那份等于较早一条时被误判 conflict 永久留盘。
+
+test('j5｜第 42 轮高-1：同 id、四字段全同、仅 extraLines（人手批注）不同的错位，必须保留活跃区那条并 warn', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-misalign-extralines-'));
+  try {
+    const file = path.join(dir, 'playbook.md');
+    const archiveFile = path.join(dir, 'archive.md');
+    const STAMP = '2026-10-24T09:00:00.000+08:00';
+    const body = (id, title, condition, action) => [
+      '### [' + id + '] ' + title,
+      '- 条件：' + condition,
+      '- 做法：' + action,
+      '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=1 lastHit=',
+      '',
+    ];
+    // 活跃区这份比归档那份多一行人手批注（模拟人在归档之后往这条上写了备注）。
+    await fs.writeFile(file, [
+      '# ACE 操作手册', '',
+      ...body('ace-001', '无关条目', 'c-a1', 'a-a1'),
+      ...body('ace-002', '同 id 同正文异批注', 'c-EX', 'a-EX'),
+      '> 人手批注：这行只存在于活跃区',
+      '',
+    ].join('\n') + '\n', 'utf8');
+    await appendArchivedEntries(archiveFile, [
+      {
+        id: 'ace-002', title: '同 id 同正文异批注', condition: 'c-EX', action: 'a-EX', rationale: '',
+        meta: { created: STAMP, updated: STAMP, hits: 1, lastHit: '' },
+        archive: { reason: 'evicted', date: STAMP, supersededBy: '' },
+      },
+    ], { highWater: 2 });
+    const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+
+    const logs = [];
+    await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目', condition: 'c9', action: 'a9' }], 10, {
+      archiveFile, today: STAMP, logger: { warn: (m) => logs.push(String(m)) },
+    });
+
+    const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+    const activeText = await fs.readFile(file, 'utf8');
+    const archiveText = await fs.readFile(archiveFile, 'utf8');
+    const activeTwo = parsed.entries.find((e) => e.id === 'ace-002');
+    assert.ok(activeTwo, '仅批注不同的那条必须留在活跃区：' + JSON.stringify(parsed.entries.map((e) => e.id)));
+    assert.equal(activeTwo.condition, 'c-EX', '四个正文字段全同也不许摘——正文之外还有批注');
+    assert.ok(
+      (activeTwo.extraLines || []).some((l) => l.includes('人手批注：这行只存在于活跃区')),
+      '活跃区独有的批注行必须原样在活跃区：' + JSON.stringify(activeTwo.extraLines),
+    );
+    // ★ 这两句就是高-1 的现场：旧口径下活跃区那条被摘，批注在手册与归档里同时消失。
+    assert.equal(archiveText.includes('人手批注：这行只存在于活跃区'), false, '（前置事实）归档里确实没有这行批注 ⇒ 活跃区那份一旦被摘，批注就是真丢了');
+    assert.ok(activeText.includes('人手批注：这行只存在于活跃区'), '人手批注绝不许被静默物理抹掉（旧口径实测：手册 false / 归档 false）');
+    const archived = (await readArchiveSnapshot(archiveFile)).entries;
+    assert.deepEqual(archived.map((e) => e.id).sort(), ['ace-002'], '归档里还是那一条，不许重复归档');
+    const misWarn = logs.find((m) => m.includes('同 id 但正文不同'));
+    assert.ok(misWarn, '仅批注不同也必须走既有的 conflict 路径留一行 warn：' + JSON.stringify(logs));
+    assert.ok(misWarn.includes('ace-002') && misWarn.includes('未摘除活跃区那条') && misWarn.includes('请人工确认'), 'warn 内容照旧：' + misWarn);
+  } finally {
+    await cleanup(dir);
+  }
+});
+
+test('j6｜第 42 轮低-1 前置证明：空字段条目与占位符条目序列化后逐字相同（所以归一化比对是安全的）', () => {
+  const STAMP = '2026-10-24T09:00:00.000+08:00';
+  const mk = (condition, action) => ({
+    id: 'ace-001', title: '同一标题', condition, action, rationale: '',
+    meta: { created: STAMP, updated: STAMP, hits: 0, lastHit: '' },
+  });
+  const emptyDoc = serializePlaybook({ header: ['# ACE 操作手册', ''], entries: [mk('', '')] });
+  const placeholderDoc = serializePlaybook({ header: ['# ACE 操作手册', ''], entries: [mk('（未注明）', '（未注明）')] });
+  assert.equal(emptyDoc, placeholderDoc, '空字段落盘就是占位符（lib/entry-format.js writeEntryBlock）⇒ 两者在盘上是同一份');
+  assert.ok(emptyDoc.includes('- 条件：（未注明）') && emptyDoc.includes('- 做法：（未注明）'));
+  // 反过来说：解析回来的两侧**不会**都长成空串 —— 空字段落盘再读回也只剩占位符字符串，
+  // 这正是低-1 的现场（活跃区空串 vs 归档侧占位符，旧写法准时误判 conflict）。
+  assert.equal(parsePlaybook(emptyDoc).entries[0].condition, '（未注明）', '空字段落盘再读回就是占位符');
+  assert.equal(parsePlaybook(placeholderDoc).entries[0].condition, '（未注明）', '手写占位符的那份读回也是占位符');
+});
+
+test('j7｜第 42 轮低-1：活跃区空字段与归档侧的占位符必须判「同一份正文」，不许误判 conflict', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-misalign-placeholder-'));
+  try {
+    const file = path.join(dir, 'playbook.md');
+    const archiveFile = path.join(dir, 'archive.md');
+    const STAMP = '2026-10-24T09:00:00.000+08:00';
+    const body = (id, title, condition, action) => [
+      '### [' + id + '] ' + title,
+      '- 条件：' + condition,
+      '- 做法：' + action,
+      '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=1 lastHit=',
+      '',
+    ];
+    // 活跃区这份是**空字段**（写盘时被写成占位符）；归档那份是同一份正文的历史快照。
+    await fs.writeFile(file, [
+      '# ACE 操作手册', '',
+      ...body('ace-001', '无关条目', 'c-a1', 'a-a1'),
+      ...body('ace-002', '空字段条目', '', ''),
+    ].join('\n') + '\n', 'utf8');
+    await appendArchivedEntries(archiveFile, [
+      {
+        id: 'ace-002', title: '空字段条目', condition: '', action: '', rationale: '',
+        meta: { created: STAMP, updated: STAMP, hits: 1, lastHit: '' },
+        archive: { reason: 'evicted', date: STAMP, supersededBy: '' },
+      },
+    ], { highWater: 2 });
+    const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+
+    const logs = [];
+    await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目', condition: 'c9', action: 'a9' }], 10, {
+      archiveFile, today: STAMP, logger: { warn: (m) => logs.push(String(m)) },
+    });
+
+    const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+    assert.deepEqual(
+      parsed.entries.map((e) => e.id),
+      ['ace-001', 'ace-003'],
+      '空字段 vs 占位符 = 同一份正文 ⇒ 真错位，照摘（旧写法在这里误判 conflict 把那条永久留盘）',
+    );
+    assert.equal(
+      logs.some((m) => m.includes('同 id 但正文不同')),
+      false,
+      '不许报 conflict：两份正文落盘逐字相同（见 j6）：' + JSON.stringify(logs),
+    );
+    assert.ok(logs.some((m) => m.includes('正文完全一致') && m.includes('ace-002')), '要走既有的「真错位摘掉」warn：' + JSON.stringify(logs));
+  } finally {
+    await cleanup(dir);
+  }
+});
+
+test('j8｜第 42 轮低-3：归档里同 id 出现多条时，活跃区那份与任意一份一致即判真错位（不许只认最后一条）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-misalign-duparchive-'));
+  try {
+    const file = path.join(dir, 'playbook.md');
+    const archiveFile = path.join(dir, 'archive.md');
+    const STAMP = '2026-10-24T09:00:00.000+08:00';
+    const body = (id, title, condition, action) => [
+      '### [' + id + '] ' + title,
+      '- 条件：' + condition,
+      '- 做法：' + action,
+      '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=1 lastHit=',
+      '',
+    ];
+    await fs.writeFile(file, [
+      '# ACE 操作手册', '',
+      ...body('ace-001', '无关条目', 'c-a1', 'a-a1'),
+      // 活跃区这份 = 归档里**较早**那一份（逐字相同）。旧写法 byId.set 只认最后一条 ⇒ 误判 conflict。
+      ...body('ace-002', '同 id 双份', 'c-OLD', 'a-OLD'),
+    ].join('\n') + '\n', 'utf8');
+    // appendArchivedEntries 对同 id 是静默跳过的（lib/archive-file.js 的 seen 集合）⇒ 手工追加第二份造「同 id 两份」。
+    await appendArchivedEntries(archiveFile, [
+      {
+        id: 'ace-002', title: '同 id 双份', condition: 'c-OLD', action: 'a-OLD', rationale: '',
+        meta: { created: STAMP, updated: STAMP, hits: 0, lastHit: '' },
+        archive: { reason: 'evicted', date: STAMP, supersededBy: '' },
+      },
+    ], { highWater: 2 });
+    const archiveText = await fs.readFile(archiveFile, 'utf8');
+    await fs.writeFile(archiveFile, archiveText + [
+      '### [ace-002] 同 id 双份（后来那份）',
+      '- 条件：c-NEWER',
+      '- 做法：a-NEWER',
+      '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=0 lastHit=',
+      '- 归档：reason=evicted date=' + STAMP,
+      '',
+    ].join('\n'), 'utf8');
+    const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+
+    const logs = [];
+    await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目', condition: 'c9', action: 'a9' }], 10, {
+      archiveFile, today: STAMP, logger: { warn: (m) => logs.push(String(m)) },
+    });
+
+    const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+    assert.deepEqual(
+      parsed.entries.map((e) => e.id),
+      ['ace-001', 'ace-003'],
+      '活跃区那份与较早那份逐字相同 ⇒ 真错位，摘掉（旧写法只认最后一条 ⇒ 误判 conflict 永久留盘）',
+    );
+    assert.equal(logs.some((m) => m.includes('同 id 但正文不同')), false, '不许报 conflict：至少有一份归档与活跃区逐字相同：' + JSON.stringify(logs));
+    assert.ok(logs.some((m) => m.includes('正文完全一致') && m.includes('ace-002')), '要走既有的真错位 warn：' + JSON.stringify(logs));
+  } finally {
+    await cleanup(dir);
+  }
+});
+
+test('j9｜第 42 轮低-2：归档文件读失败时对账静默跳过改成留一行 warn，控制流不变（提交照常成功）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-archive-readfail-'));
+  try {
+    const file = path.join(dir, 'playbook.md');
+    const archiveFile = path.join(dir, 'archive.md');
+    const STAMP = '2026-10-24T09:00:00.000+08:00';
+    // 归档路径是个**目录**：readArchiveSnapshot 读到 EISDIR 会抛（ENOENT 才算空归档，不进这个 catch）。
+    await fs.mkdir(archiveFile, { recursive: true });
+    await fs.writeFile(file, [
+      '# ACE 操作手册', '',
+      '### [ace-001] 现有条目',
+      '- 条件：c-a1',
+      '- 做法：a-a1',
+      '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=0 lastHit=',
+      '',
+    ].join('\n') + '\n', 'utf8');
+    const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+
+    const logs = [];
+    let out = null;
+    let threw = null;
+    try {
+      out = await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目', condition: 'c9', action: 'a9' }], 10, {
+        archiveFile, today: STAMP, logger: { warn: (m) => logs.push(String(m)) },
+      });
+    } catch (e) {
+      threw = e;
+    }
+    assert.equal(threw, null, '读归档失败不许阻断提交（真正保证落在写盘那一步 appendArchivedEntries）：' + (threw && threw.message));
+    assert.ok(out, 'commitOps 照常返回');
+    const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+    assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-002'], '候选照常落盘');
+    assert.ok(
+      logs.some((m) => m.startsWith('dsh-ace: 归档文件读取失败') && m.includes('对账') && m.includes(archiveFile)),
+      '第 42 轮低-2：读归档失败从静默改成留一行 warn（带上归档路径），否则「对账为什么没生效」查不到：' + JSON.stringify(logs),
+    );
+  } finally {
+    await cleanup(dir);
+  }
+});
+
+test('j10｜第 43 轮低-3：归档长期不可读时同一路径只 warn 一次（去重是纯内存，控制流与提交结果一字未变）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-archive-readfail-once-'));
+  try {
+    const file = path.join(dir, 'playbook.md');
+    const archiveFile = path.join(dir, 'archive.md');
+    const STAMP = '2026-10-24T09:00:00.000+08:00';
+    // 归档路径是个**目录**（EISDIR）—— 与 j9 同一个触发法，这里要的是「反复触发」。
+    await fs.mkdir(archiveFile, { recursive: true });
+    await fs.writeFile(file, [
+      '# ACE 操作手册', '',
+      '### [ace-001] 现有条目',
+      '- 条件：c-a1',
+      '- 做法：a-a1',
+      '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=0 lastHit=',
+      '',
+    ].join('\n') + '\n', 'utf8');
+
+    const logs = [];
+    const logger = { warn: (m) => logs.push(String(m)) };
+    const expectedWarns = () => logs.filter((m) => m.startsWith('dsh-ace: 归档文件读取失败')).length;
+
+    // ① commitOps 连提交三次：三次都读不动归档，日志只该有一行（第 42 轮是三次三行）。
+    for (let i = 1; i <= 3; i += 1) {
+      const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+      const out = await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目' + i, condition: 'c' + i, action: 'a' + i }], 10, {
+        archiveFile, today: STAMP, logger,
+      });
+      assert.ok(out, '第 ' + i + ' 次提交照常返回（去重只管日志，绝不影响控制流）');
+      assert.equal(expectedWarns(), 1, '第 ' + i + ' 次之后读归档失败的 warn 仍然只有 1 行：' + JSON.stringify(logs));
+    }
+    const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+    assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-002', 'ace-003', 'ace-004'], '候选照常落盘（提交结果与去重无关）');
+
+    // ② 另一条提交路径（commitCapacity）读同一个归档：同一路径，仍然不重复 warn。
+    await commitCapacity(file, {
+      archiveFile, today: STAMP, maxEntries: 10,
+      evict: [{ id: 'ace-001', reason: 'evicted', date: STAMP }],
+      logger,
+    });
+    assert.equal(expectedWarns(), 1, 'commitCapacity 这条路径也走同一个去重表（两条路径同口径）：' + JSON.stringify(logs));
+
+    // ③ 换一个归档路径（归档文件真的换成一份可读的）：新路径自己的那一行 warn 照发，不被别人的记录吞掉。
+    const otherArchive = path.join(dir, 'archive-2.md');
+    await fs.mkdir(otherArchive, { recursive: true });
+    const snapshot2 = parsePlaybook(await fs.readFile(file, 'utf8'));
+    await commitOps(file, { entries: snapshot2.entries }, [{ op: 'add', title: '新条目5', condition: 'c5', action: 'a5' }], 10, {
+      archiveFile: otherArchive, today: STAMP, logger,
+    });
+    assert.equal(expectedWarns(), 2, '去重是按路径记的：换了路径就该有它自己的一行 warn：' + JSON.stringify(logs));
+    assert.ok(
+      logs.filter((m) => m.startsWith('dsh-ace: 归档文件读取失败')).some((m) => m.includes(otherArchive)),
+      '第二行 warn 必须带上新路径（证明两行不是同一句重复）：' + JSON.stringify(logs),
+    );
+  } finally {
+    await cleanup(dir);
+  }
+});

@@ -343,8 +343,12 @@ test('条目⑦c：/stats 的 catch 兜底与成功路径同形（不再是缺�
   // 改为 emptyStats(STATS_REASONS.unreadable, ...)：scale / daily / recent / source / windowDays / generatedAt 都在
   // C6 起还要带 runtime 块（本进程内存态的六项运行计数）——它和手册文件内容无关，降级分支也必须照带，
   // 否则「手册读不到」时设置页的运行统计会整块消失。
-  assert.match(branch, /return send\(200, emptyStats\(STATS_REASONS\.unreadable, \{ maxEntries: live\.maxEntries, runtime: runtimeSnapshot\(\) \}\)\);/);
+  // 第 40 轮 R1：降级体改成 {...emptyStats(...), injection: injectionSnapshot()} 的展开形式，
+  // 语义不变（仍是空态 + reason + runtime），只多一个并列键 injection —— 于是这里断言
+  // 「emptyStats 调用仍在、runtime 仍两条路各带一次、injection 也两条路各带一次」。
+  assert.match(branch, /emptyStats\(STATS_REASONS\.unreadable, \{ maxEntries: live\.maxEntries, runtime: runtimeSnapshot\(\) \}\)/);
   assert.equal((branch.match(/runtime: runtimeSnapshot\(\)/g) || []).length, 2, '成功路径与兜底路径都必须带 runtime');
+  assert.equal((branch.match(/injection: injectionSnapshot\(\)/g) || []).length, 2, '注入诊断快照在成功路径与兜底路径都必须带上');
 });
 
 test('条目⑦d：/inbox 的降级体带 reason，与「真的没有待合并条目」不再同形', () => {

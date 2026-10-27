@@ -434,11 +434,22 @@ test('P0-7｜apply() 真跑一次不抛：注册 3 个工具 / 1 段系统提示
   assert.equal(section.interpolate, false, 'P0-3：section 必须 interpolate:false');
   assert.equal(typeof section.text, 'function');
 
+  // 第 40 轮 R2：两条注入接缝（inbox 预检索 + pre-step 投递）**上移到最前面**，
+  // 紧跟 ctx.systemPrompt.section(playbookSectionSpec(...)) 之后注册。
+  // 原顺序是 ['tools/result','agent/turn-stopping','agent/status', 'inbox','pre-step']，
+  // 即两条注入接缝排在 recapController 装配之后 —— 那一段里任何一个构造成员抛错，
+  // 结果就是「系统提示段在、注入 handler 不在」，症状与全库注入自 2026-10-26 起归零完全一致。
+  // 现在断言的前四项里前两项就是注入接缝本身：只要 section 注册成功，这两条必然已经挂上。
   assert.deepEqual(
     record.handlers.map((h) => h.event),
     // 第 33 轮：agent/error 监听已随「回合成败判定」整层删除（不再有未观测态要收）。
-    ['tools/result', 'agent/turn-stopping', 'agent/status', 'agent/inbox/inserted', 'agent/pre-step'],
-    'agent/pre-step 是第 28 轮新增的注入投递接缝（注入只许追加进历史）',
+    ['agent/inbox/inserted', 'agent/pre-step', 'tools/result', 'agent/turn-stopping', 'agent/status'],
+    'R2：两条注入接缝必须先于其余订阅挂上（section 在 ⇒ 注入 handler 也在）',
+  );
+  // 开机日志：一次性写明两条接缝已挂载 + 两个开关值（第 40 轮 R2 的可观测锚点）。
+  assert.ok(
+    state.record.logs.info.some((m) => m.includes('dsh-ace: 注入接缝已挂载（inbox handler + pre-step delivery）')),
+    'apply 尾部必须打一行开机日志写明两条注入接缝已挂载',
   );
   assert.deepEqual(record.commands.map((c) => c.name), ['ace']);
   assert.deepEqual(record.injected.map((i) => i.deps), [['webServer']]);

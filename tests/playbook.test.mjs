@@ -423,6 +423,79 @@ test('writeFileAtomic：写入后不残留 .lock 与临时文件', async () => {
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
+// —— 第 39 轮缺陷 3：Windows 上「读着手册时写手册」整笔 EPERM ——
+
+test('R39缺陷3｜rename 撞 EPERM（读者占着目标句柄）时退避重试，读者放开后写入成功', async () => {
+  // 机制（exp/mono.mjs 钉死）：Windows 上 rename 覆盖目标要求「目标上没有不带
+  // FILE_SHARE_DELETE 的打开句柄」，Node 的 fs.readFile 不满足 ⇒ 一个只读快照读者
+  // 就能让整笔 commit 抛 EPERM（exp/atomic-race2.mjs 实测 1 读者 35/300、3 读者 96/300）。
+  // 修法：writeFileAtomic 的 catch 里对 EPERM/EBUSY/EACCES 做 50/150/400ms 三次退避重试。
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-ep-'));
+  const file = path.join(dir, 'playbook.md');
+  await writeFileAtomic(file, 'first');
+
+  // 用一个只读句柄占住目标（Node 的 fs.open 默认不带 FILE_SHARE_DELETE，
+  // 与 readFile 的行为一致，能真实复现 Windows 上的 EPERM）。
+  const handle = await fs.open(file, 'r');
+  let firstAttemptFailed = false;
+  try {
+    // 对照：不占句柄时立刻成功。
+    await writeFileAtomic(file, 'no-reader');
+    assert.equal(await fs.readFile(file, 'utf8'), 'no-reader');
+  } catch (e) {
+    firstAttemptFailed = true;
+  }
+
+  // 让读者在 60ms 后放开（落在 50ms 退避之后、150ms 退避之前）。
+  setTimeout(() => { handle.close().catch(() => {}); }, 60);
+
+  const started = Date.now();
+  // 这一笔必须在退避重试后成功（读者放开 + 150ms 那一档），不再整笔抛 EPERM。
+  await writeFileAtomic(file, 'after-retry');
+  const elapsed = Date.now() - started;
+  assert.equal(await fs.readFile(file, 'utf8'), 'after-retry', '退避重试后手册必须已更新');
+  // 真的等过至少一档退避（证明不是「恰好一次就成」的假绿）。
+  assert.ok(elapsed >= 40, '没有走退避重试（耗时 ' + elapsed + 'ms）：这条用例可能没测到 EPERM');
+  // 目录里不许留下临时文件或锁文件。
+  const left = await fs.readdir(dir);
+  assert.deepEqual(left, ['playbook.md'], '重试后不许留残渣：' + JSON.stringify(left));
+  // 若本平台 rename 从不失败（非 Windows），如实说明而不是假装测到。
+  if (firstAttemptFailed) console.log('R39缺陷3：本平台 rename 确实会被占用句柄打挂（EPERM 复现）');
+  else console.log('R39缺陷3：本平台 rename 覆盖不受占用句柄影响（非 Windows 语义），重试路径未实测');
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+test('R39缺陷3｜rename 一直失败时仍抛原错误，且重试次数有上限（不变成死循环）', async () => {
+  // 结构性/持续性占用：退避三次（50+150+400=600ms）之后必须把原错误抛出去，
+  // 调用方语义一字不变；同时不许无上限重试。
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-ep2-'));
+  const file = path.join(dir, 'playbook.md');
+  await writeFileAtomic(file, 'first');
+  const handle = await fs.open(file, 'r');
+  const started = Date.now();
+  let thrown = null;
+  try {
+    await writeFileAtomic(file, 'blocked');
+  } catch (e) {
+    thrown = e;
+  }
+  const elapsed = Date.now() - started;
+  await handle.close();
+  if (thrown) {
+    assert.ok(['EPERM', 'EBUSY', 'EACCES'].includes(thrown.code), '抛出的应是占用类错误，实际：' + thrown.code);
+    // 三次退避 600ms：容差给到 300-3000ms，既证明等过又不能把用例拖死。
+    assert.ok(elapsed >= 300, '退避不足（' + elapsed + 'ms）');
+    assert.ok(elapsed < 5000, '重试疑似无上限（' + elapsed + 'ms）');
+    // 失败后临时文件必须清掉。
+    const left = await fs.readdir(dir);
+    assert.deepEqual(left, ['playbook.md'], '失败后不许留临时文件：' + JSON.stringify(left));
+    assert.equal(await fs.readFile(file, 'utf8'), 'first', '失败时原手册必须原样还在');
+  } else {
+    console.log('R39缺陷3：本平台 rename 覆盖不受占用句柄影响，持续性失败路径未实测');
+  }
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
 // —— T19-T23：query 片段 OR 匹配（matchEntries/querySegments） ——
 
 test('matchEntries：中文长自然句 query 经 2-gram 命中含相关词的条目', () => {

@@ -209,6 +209,8 @@ test('T228 形状检查器自证：裸字符串/裸标识符会被当场抓住�
 
 test('T229 lib/index.js: 三处通知的文案与 source 一字未改（这是形状修复，不是文案改版）', () => {
   // 复盘失败通知：正文与摘要保持原样，只换了 content 的形状。
+  // 第 39 轮缺陷 1 附带修复：放弃（总时限中断）与真失败拆成两条文案 ——
+  // 失败那条原样保留（下面两行），放弃那条另立（T229b 钉）。
   // 这里只钉字面量本身（形状由 T227 钉），所以不写 `text:`/`content:` 前缀。
   assert.ok(indexSource.includes("'ACE 自动复盘未完成：' + reason + '。本次沉淀的经验没有并入手册，可重试。'"),
     '复盘失败通知的正文不许改');
@@ -220,4 +222,20 @@ test('T229 lib/index.js: 三处通知的文案与 source 一字未改（这是�
   // 这条只钉文案与 source（形状由 T227 钉），所以写成形状无关的匹配。
   assert.ok(/createUserMessage\([\s\S]{0,200}?renderReviewText\(items\)[\s\S]{0,120}?summary/.test(indexSource),
     '/ace review 注入必须仍用 renderReviewText 渲染正文、summary 变量原样传入');
+});
+
+test('T229b 第39轮缺陷1：总时限放弃的通知文案必须与真失败区分开（不许再说「没有并入手册」', () => {
+  // 缺陷 1 附带：同一条路径原先既服务「真失败」也服务「总时限放弃」，而放弃后上游
+  // 可能仍会写盘 ⇒ 文案说谎（exp/late-write.mjs 实测：用户 150ms 时被告知「没有
+  // 并入手册」，250ms 后同两条已写进手册）。现在放弃那条必须如实说明。
+  assert.ok(indexSource.includes('。本次已超过总时限被中断，已写入的部分会保留，未完成的经验可在下回合重试。'),
+    '总时限放弃通知的正文必须说明「已超过总时限被中断 / 已写入的部分会保留 / 可在下回合重试」');
+  assert.ok(indexSource.includes("'ACE 自动复盘未完成，已超过总时限被中断，已写入的部分会保留'"),
+    '总时限放弃通知的摘要必须与失败那条区分开');
+  // 放弃那条不许再说「没有并入手册」（失败那条才可以）。
+  const abandonedStart = indexSource.indexOf('recapNotifyAbandoned');
+  assert.ok(abandonedStart > 0, 'lib/index.js 必须有 recapNotifyAbandoned 这个分叉');
+  const abandonedBlock = indexSource.slice(abandonedStart, abandonedStart + 600);
+  assert.equal(abandonedBlock.includes('没有并入手册'), false,
+    '放弃通知不许再说「没有并入手册」（上游可能已写部分手册）');
 });
