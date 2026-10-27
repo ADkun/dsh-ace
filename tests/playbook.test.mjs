@@ -1318,3 +1318,22 @@ test('R38｜同分时保持条目原序：排序键是 score 降序 + 同分按�
   const rev = scoreEntries(tie.slice().reverse(), '重复');
   assert.deepEqual(rev.map((x) => x.e.id), ['ace-102', 'ace-101', 'ace-103']);
 });
+
+// —— 第 45 轮：tf 缓存（DF_CACHE_LIMIT → TF_CACHE_TOTAL，termFreqsOf 一次扫全语料得 df+tfs）——
+// 配对矩阵的负载形状是「同一份语料、几十个不同的 query」——正是 tf 缓存的靶子。
+// 这里钉两条：热缓存与冷缓存逐位一致；跨语料来回切换不串味（index 容量 1，旧 tf 随旧语料一起失效）。
+
+test('R45｜tf 缓存：同语料反复打分（冷 → 热 → 被挤掉再冷）结果逐位一致', () => {
+  const corpus = C38.concat([
+    E('ace-020', '合并前先算相似度', '当手册满额要配对时', '用对称 BM25 比率配对，阈值 0.5', '性能修复'),
+    E('ace-021', '配对要互斥', '当多条目都够像时', '每条只进一对，贪心取最高', ''),
+  ]);
+  const queries = C38_QUERIES.concat(['相似度 配对', '合并 手册', '重复 归档', 'zzz', '']);
+  const cold = queries.map((q) => rankOf(corpus, q));
+  const hot = queries.map((q) => rankOf(corpus, q));
+  assert.deepEqual(hot, cold, '热缓存（tf 全命中）必须与冷缓存逐位一致');
+  // 用别的语料把容量 1 的索引槽挤掉，再回来 —— tf 表必须随旧语料一起作废重算。
+  scoreEntries([E('ace-090', '别的语料', '完全不同的条件', '完全不同的做法', '')], '别的语料');
+  const cold2 = queries.map((q) => rankOf(corpus, q));
+  assert.deepEqual(cold2, cold, '被挤掉后重算的结果必须与最初逐位一致');
+});

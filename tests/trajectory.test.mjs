@@ -507,7 +507,9 @@ test('lib/index.js runRecap：从宿主取真轨迹并拼进 summary（不回退
   assert.ok(body.includes('buildRecapSummary({ mutCount: pending.mutCount, trajectory })'),
     'summary 必须由计数 + 轨迹共同构成');
   // 第 33 轮：回合成败判定（三档信号 turnOutcome）整层删除，executeRecap 只剩 {agent, summary, signal}。
-  assert.ok(body.includes('executeRecap({ agent, summary, signal })'), 'executeRecap 只收 {agent, summary, signal}');
+  // 第 45 轮：加回第四个字段 deadlineAt（队列的总时限，给每次 LLM 调用派预算），依旧没有 turnOutcome。
+  assert.ok(body.includes('executeRecap({ agent, summary, signal, deadlineAt: budget?.deadlineAt })'),
+    'executeRecap 只收 {agent, summary, signal, deadlineAt}');
   assert.equal(/turnOutcome/.test(body), false, 'runRecap 不再收 turnOutcome（回合成败判定已删）');
   assert.ok(!/summary: '自动复盘：本回合有 ' \+ pending\.mutCount/.test(body),
     '不许回退成只喂「本回合有 N 次 mutating 工具调用」这句计数');
@@ -517,7 +519,7 @@ test('lib/index.js runRecap：轨迹为空就不调 LLM，只写一条 info 日�
   const body = sliceBalanced(indexSource, 'runRecap: async (agent, pending) => {');
   const guard = body.indexOf('if (!trajectory || !trajectory.text)');
   assert.notEqual(guard, -1, '必须有「轨迹为空」的守卫');
-  const recapCall = body.indexOf('executeRecap({ agent, summary, signal })');
+  const recapCall = body.indexOf('executeRecap({ agent, summary, signal, deadlineAt: budget?.deadlineAt })');
   assert.ok(guard < recapCall, '守卫必须在调 LLM 之前');
   const guardBlock = body.slice(guard, body.indexOf('const summary'));
   assert.ok(/logger\?\.info\?\.\(/.test(guardBlock), '跳过时要写一条 logger.info');

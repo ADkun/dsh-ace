@@ -111,6 +111,33 @@ test('第39轮 队列｜队列上限外丢弃最旧的一项', async () => {
   assert.ok(logs.some((m) => m.includes('回合 3')), '被丢弃的应是最旧的「回合 3」：' + logs.join(' | '));
 });
 
+test('R45 队列｜run 收到第二参 { deadlineAt } = startedAt + totalDeadlineMs（复盘预算的源头）', async () => {
+  const logs = [];
+  const queue = createRecapQueue({ logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m) }, totalDeadlineMs: 5000 });
+  const seen = [];
+  const settledOutcomes = [];
+  queue.enqueue({
+    agentId: 'a1',
+    label: '回合 2',
+    run: async (signal, budget) => {
+      seen.push({ hasSignal: signal instanceof AbortSignal, budget });
+      return 'ok';
+    },
+    onSettled: (o) => settledOutcomes.push(o),
+  });
+  const drainAt = Date.now();
+  queue.drain();
+  await sleep(20);
+  assert.equal(seen.length, 1, 'run 应被调到一次');
+  assert.equal(seen[0].hasSignal, true, '第一参照旧是 AbortSignal');
+  const at = seen[0].budget && seen[0].budget.deadlineAt;
+  assert.equal(typeof at, 'number', '第二参要有 budget.deadlineAt（数字）：' + JSON.stringify(seen[0].budget));
+  const t0 = drainAt;
+  assert.ok(at >= t0 + 4500 && at <= t0 + 5500, 'deadlineAt ≈ startedAt + 5000ms：' + at + ' vs t0=' + t0);
+  assert.equal(settledOutcomes.length, 1);
+  assert.equal(settledOutcomes[0].ok, true);
+});
+
 test('第39轮 队列｜总时限到点：abort 上游、等它真正 settle 才放行，且通知调用方', async () => {
   // 第 39 轮缺陷 1 修复后的新语义：总时限的含义从「我们不等了」变成「我们开始叫停，
   // 并等它真的停下」。三条硬断言缺一不可：

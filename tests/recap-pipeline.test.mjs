@@ -654,3 +654,91 @@ test('第45轮③d｜检查点③：合并真的跑过之后、commitOps 之前 
   assert.equal(archiveText, null, '归档文件根本不该被创建');
   await cleanup(dir);
 });
+
+// —— 第 45 轮：复盘预算（deadlineAt → 每次调用的 maxMs）——
+// 语义钉死三条：第一轮永不拦（还什么都没有，宁可照旧发起让总时限管着）；
+// 后续轮预算不足抛 oneShot 同款前缀（reflect.js 认前缀 → 按已有候选收尾）；
+// 满额手册要给合并阶段扣预留（Reflector 不许把预算吃光）。
+
+test('R45 复盘预算｜第一轮永不拦：预算见底时第一轮照旧发起且不派 maxMs，第二轮起按已有候选收尾', async () => {
+  const dir = await makeDir('budget-first-round');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [E('ace-001', '编辑前先读', '先 read 再动手')]);
+  const calls = [];
+  const { deps, agent } = makeDeps(file, {
+    reflectRound: async ({ round, maxMs, priorCandidates }) => {
+      calls.push({ round, maxMs, prior: priorCandidates.length });
+      return round === 1 ? [C('读后再改')] : [];
+    },
+  });
+  // 剩余 9000ms：扣掉落盘保底 8000 后不足一次最小调用（10000ms）→ 预算闸生效。
+  const out = await runRecapPipeline(deps, { agent, summary: '轨迹', deadlineAt: Date.now() + 9000 });
+  assert.equal(calls.length, 1, '第二轮不许再调到 deps.reflectRound（闸在管线里，轮次编排层只看到前缀超时错）：' + JSON.stringify(calls));
+  assert.equal(calls[0].round, 1);
+  assert.equal(calls[0].maxMs, undefined, '第一轮不派 maxMs（单次上限照旧兜底）');
+  assert.equal(calls[0].prior, 0);
+  assert.equal(out.added.length, 1, '第一轮的候选要落盘：' + JSON.stringify(out.added));
+  await cleanup(dir);
+});
+
+test('R45 复盘预算｜预算见底的第二轮：管线抛前缀超时错，reflectRounds 按已有候选收尾（日志可查）', async () => {
+  const dir = await makeDir('budget-later-round');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [E('ace-001', '编辑前先读', '先 read 再动手')]);
+  const logs = [];
+  const { deps, agent } = makeDeps(file);
+  deps.logger = { info: (m) => logs.push(String(m)), warn: (m) => logs.push(String(m)) };
+  deps.reflectRound = async ({ round }) => (round === 1 ? [C('读后再改')] : []);
+  const out = await runRecapPipeline(deps, { agent, summary: '轨迹', deadlineAt: Date.now() + 9000 });
+  assert.equal(out.added.length, 1);
+  assert.ok(logs.some((m) => m.includes('第 2 轮不再发起')), '闸的错误要留痕：' + logs.join(' | '));
+  assert.ok(logs.some((m) => m.includes('按已提炼的 1 条候选落盘')), '已有候选不许丢：' + logs.join(' | '));
+  assert.equal(out.rounds, 1, '实际跑完的轮数按「最后一轮成功」计：' + out.rounds);
+  await cleanup(dir);
+});
+
+test('R45 复盘预算｜预算充足：每次调用都带 maxMs，且不满额时不扣合并预留（120000-8000）', async () => {
+  const dir = await makeDir('budget-ample');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [E('ace-001', '编辑前先读', '先 read 再动手')]);
+  const calls = [];
+  const { deps, agent } = makeDeps(file, {
+    reflectRound: async ({ round, maxMs }) => { calls.push({ round, maxMs }); return round === 1 ? [C('读后再改')] : []; },
+  });
+  await runRecapPipeline(deps, { agent, summary: '轨迹', deadlineAt: Date.now() + 120000 });
+  assert.equal(calls.length, 2, JSON.stringify(calls));
+  assert.ok(calls[0].maxMs >= 100000 && calls[0].maxMs <= 112000,
+    '第一轮 maxMs = 剩余 − 落盘保底（8s）≈ 112s：' + calls[0].maxMs);
+  assert.ok(calls[1].maxMs > 0 && calls[1].maxMs <= calls[0].maxMs, '第二轮不高于第一轮（时间单调流逝）');
+  await cleanup(dir);
+});
+
+test('R45 复盘预算｜满额手册（>= maxEntries）：Reflector 的调用预算要扣出合并预留 ' + 40000 + 'ms', async () => {
+  const dir = await makeDir('budget-full-reserve');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [E('ace-001', '编辑前先读', '先 read 再动手')]);
+  const calls = [];
+  const { deps, agent } = makeDeps(file, {
+    maxEntries: 1, // 满额：1 条 >= 1 条 → 合并阶段几乎必跑
+    reflectRound: async ({ round, maxMs }) => { calls.push({ round, maxMs }); return []; },
+  });
+  await runRecapPipeline(deps, { agent, summary: '轨迹', deadlineAt: Date.now() + 120000 });
+  assert.equal(calls.length, 1, JSON.stringify(calls));
+  assert.ok(calls[0].maxMs >= 60000 && calls[0].maxMs <= 72000,
+    'maxMs = 120s − 合并预留 40s − 落盘保底 8s = 72s：' + calls[0].maxMs);
+  await cleanup(dir);
+});
+
+test('R45 复盘预算｜无 deadlineAt（测试直跑 / 旧调用方）：行为与旧版完全一致，不派 maxMs', async () => {
+  const dir = await makeDir('budget-absent');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [E('ace-001', '编辑前先读', '先 read 再动手')]);
+  const calls = [];
+  const { deps, agent } = makeDeps(file, {
+    reflectRound: async ({ round, maxMs }) => { calls.push({ round, maxMs }); return round === 1 ? [C('读后再改')] : []; },
+  });
+  const out = await runRecapPipeline(deps, { agent, summary: '轨迹' });
+  assert.deepEqual(calls, [{ round: 1, maxMs: undefined }, { round: 2, maxMs: undefined }]);
+  assert.equal(out.added.length, 1);
+  await cleanup(dir);
+});

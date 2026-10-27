@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeMergeSuggestions, MERGE_THRESHOLD_RATIO } from '../lib/merge.js';
+import { computeMergeSuggestions, computePairRatios, pairRatioAt, MERGE_THRESHOLD_RATIO } from '../lib/merge.js';
 import { scoreEntries } from '../lib/playbook.js';
 import {
   MERGE_SYSTEM,
   MERGE_MAX_ROUNDS,
+  MERGE_MIN_CALL_MS,
+  MERGE_COMMIT_RESERVE_MS,
   mergePairInput,
   parseMergeResult,
   findMergePairs,
@@ -216,4 +218,141 @@ test('findMergePairs：对称 BM25 比率 >= 阈值才成对，且各条只出�
   const pairs = findMergePairs([a, b, c]);
   assert.equal(pairs.length, 1, '只有 a↔b 够像：' + JSON.stringify(pairs.map((p) => [p.a.id, p.b.id])));
   assert.deepEqual([pairs[0].a.id, pairs[0].b.id].sort(), ['ace-001', 'ace-002']);
+});
+
+// —— 第 45 轮：配对矩阵（computePairRatios + pairRatioAt）——
+// 性能修复的前提是「口径不变」：矩阵比值必须和旧 bodyRatio（query=正文对全语料打两遍分）
+// 逐位一致。这里在测试里把旧 bodyRatio 的原始算法重抄一遍当对照（scoreEntries 是公开导出），
+// 对每对 (i, j) 逐位比较。
+
+/**
+ * 旧版 bodyRatio 的原样重抄（lib/merge.js 改造前的算法，保留作对照锚）。
+ * 生产里它只被 computeMergeSuggestions 调用，而后者喂进来的语料是 projectBody 投影过的
+ * （title 置空 —— 标题不参与相似度），所以对照锚也要先投影，否则锚本身就不是旧口径。
+ */
+function legacyBodyRatio(entries, ia, ib) {
+  const corpus = entries.map((e) => ({ ...e, title: '' }));
+  const bodyText = (e) => [e.condition, e.action, e.rationale].filter((s) => typeof s === 'string').join('\n').toLowerCase();
+  const qa = bodyText(corpus[ia]);
+  const qb = bodyText(corpus[ib]);
+  if (!qa || !qb) return 0;
+  const byA = scoreEntries(corpus, qa);
+  const byB = scoreEntries(corpus, qb);
+  const selfA = byA.find((x) => x.i === ia)?.score || 0;
+  const hitB = byA.find((x) => x.i === ib)?.score || 0;
+  const selfB = byB.find((x) => x.i === ib)?.score || 0;
+  const hitA = byB.find((x) => x.i === ia)?.score || 0;
+  if (!(selfA > 0) || !(selfB > 0)) return 0;
+  const r = Math.min(hitB / selfA, hitA / selfB);
+  return r <= 0 ? 0 : Math.min(1, r);
+}
+
+test('R45｜computePairRatios + pairRatioAt 与旧 bodyRatio 逐位一致（含空正文=0、对称、钳 1）', () => {
+  const a = makeEntry('ace-001', '批量改名前先列调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const b = makeEntry('ace-002', '批量重命名要核对调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const c = makeEntry('ace-003', 'CSS 布局一律用 grid', '要写页面布局时', '直接用 grid 排版');
+  const d = makeEntry('ace-004', '空正文条目', '', '');
+  const e2 = makeEntry('ace-005', '重复提交前先查幂等键', '当要重发请求时', '先带同一个幂等键查询结果再决定重发');
+  const entries = [a, b, c, d, e2];
+  const ratios = computePairRatios(entries);
+  assert.equal(ratios.n, entries.length);
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = 0; j < entries.length; j++) {
+      const got = pairRatioAt(ratios, i, j);
+      const want = legacyBodyRatio(entries, i, j);
+      assert.equal(got, want, `pairRatioAt(${i},${j}) = ${got}，旧算法 = ${want}`);
+      assert.equal(pairRatioAt(ratios, j, i), pairRatioAt(ratios, i, j), '矩阵比值必须对称');
+    }
+  }
+  assert.equal(pairRatioAt(ratios, 0, 3), 0, '空正文那行（rows=null）比值必须是 0');
+  assert.equal(pairRatioAt(ratios, 0, 0), 1, '自己对自己的数学值是 1（旧 bodyRatio 同款）；findMergePairs 用 j!==i 跳开它');
+  // 完全同文的两条 → 比率恰好 1（min(1,1)），不许冒出 >100%。
+  const t1 = makeEntry('ace-010', 't', '同一句话', '同一个做法');
+  const t2 = makeEntry('ace-011', 't', '同一句话', '同一个做法');
+  const rt = pairRatioAt(computePairRatios([t1, t2]), 0, 1);
+  assert.equal(rt, 1, '同文比率必须是 1，实际 ' + rt);
+  // 钳 1 必须真的在钳（变异自证的牙齿）：手工造一份「双向比率都 >1」的矩阵
+  //（stub，不经打分），没有那层 Math.min(1, r) 时这里拿到的是 1.5。
+  const stub = {
+    n: 2,
+    selfs: Float64Array.from([2, 1]),
+    rows: [Float64Array.from([2, 3]), Float64Array.from([3, 1])],
+  };
+  assert.equal(pairRatioAt(stub, 0, 1), 1, '双向都超 1 时必须钳到 1（无钳会得 1.5）');
+  const stub2 = {
+    n: 2,
+    selfs: Float64Array.from([2, 1]),
+    rows: [Float64Array.from([2, 1]), Float64Array.from([0.5, 1])],
+  };
+  assert.equal(pairRatioAt(stub2, 0, 1), 0.5, '正常子 1 比率必须原样透传');
+});
+
+test('R45｜findMergePairs（矩阵版）与旧实现同配对：3 条目还是只成 a↔b 一对', () => {
+  const a = makeEntry('ace-001', '批量改名前先列调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const b = makeEntry('ace-002', '批量重命名要核对调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const c = makeEntry('ace-003', 'CSS 布局一律用 grid', '要写页面布局时', '直接用 grid 排版');
+  const blank = makeEntry('ace-004', '空正文', '', '');
+  const pairs = findMergePairs([a, b, c, blank]);
+  assert.equal(pairs.length, 1, '空正文条目不参与配对：' + JSON.stringify(pairs.map((p) => [p.a.id, p.b.id])));
+  assert.deepEqual([pairs[0].a.id, pairs[0].b.id].sort(), ['ace-001', 'ace-002']);
+  assert.ok(pairs[0].ratio >= MERGE_THRESHOLD_RATIO);
+});
+
+test('R45｜planMerges 预算闸：剩余预算不足就不发起新的一对（warn、不抛、已有部分照常返回）', async () => {
+  assert.equal(MERGE_MIN_CALL_MS, 10000);
+  assert.equal(MERGE_COMMIT_RESERVE_MS, 8000);
+  const a = makeEntry('ace-001', '批量改名前先列调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const b = makeEntry('ace-002', '批量重命名要核对调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const body = { title: 't', condition: 'c', action: 'a', rationale: 'r' };
+  const warns = [];
+  let asked = 0;
+  const out = await planMerges([a, b], {
+    ask: async () => { asked += 1; return JSON.stringify(body); },
+    date: '2026-10-27T09:00:00.000+08:00',
+    logger: { info: () => {}, warn: (m) => warns.push(String(m)) },
+    budget: { remaining: () => MERGE_COMMIT_RESERVE_MS + MERGE_MIN_CALL_MS - 1 },
+  });
+  assert.equal(asked, 0, '预算连一次调用的最小份额都不够 → 一对都不许发起');
+  assert.deepEqual(out.ops, []);
+  assert.deepEqual(out.moves, []);
+  assert.equal(warns.length, 1, '要留一条 warn：' + JSON.stringify(warns));
+  assert.ok(warns[0].includes('合并剩余预算不足'), warns[0]);
+});
+
+test('R45｜planMerges 预算闸：第一对成功后预算耗尽 → 只合并这一对，部分结果照常返回（红线 12）', async () => {
+  const a = makeEntry('ace-001', '批量改名前先列调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const b = makeEntry('ace-002', '批量重命名要核对调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const c = makeEntry('ace-003', '重复提交前先查幂等键', '当要重发请求时', '先带同一个幂等键查询结果再决定重发');
+  const d = makeEntry('ace-004', '重发请求要带幂等键', '当要重发请求时', '先带同一个幂等键查询结果再决定重发');
+  const body = { title: 't', condition: 'c', action: 'a', rationale: 'r' };
+  const asked = [];
+  let remaining = 200000;
+  const out = await planMerges([a, b, c, d], {
+    ask: async (text, opts) => {
+      asked.push(opts);
+      remaining = MERGE_COMMIT_RESERVE_MS + MERGE_MIN_CALL_MS - 1; // 第一问之后预算见底
+      return JSON.stringify(body);
+    },
+    date: '2026-10-27T09:00:00.000+08:00',
+    logger: { info: () => {}, warn: () => {} },
+    budget: { remaining: () => remaining },
+  });
+  assert.equal(asked.length, 1, '第二对不许再发起：' + JSON.stringify(asked.length));
+  assert.equal(out.merged.length, 1, '第一对的结果要完整保留（部分成功也是成功）');
+  assert.equal(out.moves.length, 1);
+  assert.equal(out.failed.length, 0, '预算耗尽不是失败，不许记 failed：' + JSON.stringify(out.failed));
+  assert.ok(asked[0] && asked[0].maxMs >= MERGE_MIN_CALL_MS, '首次调用要带上剩余预算派生的 maxMs：' + JSON.stringify(asked[0]));
+});
+
+test('R45｜planMerges 无预算（deps.budget 缺失）时 ask 不带 maxMs —— 老调用方行为不变', async () => {
+  const a = makeEntry('ace-001', '批量改名前先列调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const b = makeEntry('ace-002', '批量重命名要核对调用点', '当批量重命名符号时', '先用 grep 列出全部调用点再改');
+  const body = { title: 't', condition: 'c', action: 'a', rationale: 'r' };
+  const opts = [];
+  await planMerges([a, b], {
+    ask: async (text, o) => { opts.push(o); return JSON.stringify(body); },
+    date: '2026-10-27T09:00:00.000+08:00',
+  });
+  assert.equal(opts.length, 1);
+  assert.equal(opts[0].maxMs, undefined, '无预算 → 不派 maxMs（单次上限照旧兜底）');
 });
