@@ -919,7 +919,7 @@ test('H2：logger 各种畸形形状都不抛（info/warn 不是函数、非对�
     { get info() { throw new Error('boom'); } },   // getter 抛错：可选链也挡不住，但这里连碰都不该碰
   ];
   for (const logger of badLoggers) {
-    // 1) recordTurnEnd 的合并留痕（lib/trigger.js:143 原来的 logger?.info?.(…) 就在这里）
+    // 1) recordTurnEnd 的合并留痕（lib/trigger.js 头注「为什么不能继续用 logger?.info?.(…)」讲的就是这里）
     const st = createRecapState();
     st.mutCount = 2;
     recordTurnEnd(st, { turn: 5, config: cfg, logger });

@@ -165,7 +165,7 @@ test('第39轮 队列｜总时限到点：abort 上游、等它真正 settle 才
 });
 
 test('第39轮 队列｜M1 防线：生产形状（每回合 enqueue 后都 drain）下多次入队不会并发', async () => {
-  // 缺陷 7 第一条：lib/recap-queue.js:101 `if (state.running) return;` 这道防线
+  // 缺陷 7 第一条：lib/recap-queue.js 的 `if (state.running) return;` 这道防线
   // 之前**没有任何用例覆盖**（审计把它注释掉后全仓 570/569 仍全绿）。
   // 而生产形状正是「每回合 enqueue 后立刻 drain」（lib/index.js 的 runRecap 里
   // enqueue → drain → return {queued:true}），审计的 exp/m1-gap.mjs 实测：
@@ -211,7 +211,7 @@ test('第39轮 队列｜真失败也通知调用方，且不把异常抛出去',
 });
 
 test('第39轮 队列｜真失败触发 onFailed（缺陷 2：mutating 计数的回滚钩子），放弃不触发', async () => {
-  // 缺陷 2：生产路径的真实失败发生在队列里（lib/index.js:721 → executeRecap 抛错 →
+  // 缺陷 2：生产路径的真实失败发生在队列里（lib/index.js 的 executeRecap 抛错 →
   // 队列的失败分支），**绕过** lib/recap.js 的 catch —— 那条 catch 只在 runRecap 同步
   // 抛错时触发。于是失败那一次 mutating 额度被吞，threshold>1 时要重新攒满
   // （exp/acct.mjs 场景 1 vs 场景 2 实测 mutCount 0 vs 1；acct2.mjs threshold=3 下回合 4
@@ -267,4 +267,39 @@ test('第39轮 队列｜logger 畸形/缺失都不炸', async () => {
     await sleep(30);
     assert.equal(queue.busy, false, 'logger 畸形时队列应照常跑完');
   }
+});
+
+test('第45轮③b｜merge 回调返回假值 ⇒ 不合并、照常排队（既不许谎报合并，也不许把它丢掉）', async () => {
+  const logs = [];
+  const queue = createRecapQueue({ logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m) }, totalDeadlineMs: 5000 });
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const summaries = [];
+  const run = async (item) => { await firstGate; summaries.push(item.label); return 'ok'; };
+
+  // 与上一条（merge 返回 true）同一套桩：先让第一份真的在跑，第二份成为唯一待跑项。
+  queue.enqueue({ agentId: 'a1', label: '回合 2', run: () => run({ label: '回合 2' }) });
+  queue.drain();
+  await sleep(10);
+  queue.enqueue({ agentId: 'a1', label: '回合 3', run: () => run({ label: '回合 3' }) });
+
+  // 第三份带一个「说没合」的 merge 回调（enqueue 的第二个参数）。
+  const out = queue.enqueue(
+    { agentId: 'a1', label: '回合 4', run: () => run({ label: '回合 4' }) },
+    () => false,
+  );
+
+  assert.equal(out.merged, false, 'merge 说不合，返回值就必须说不合（不许谎报已经并进上一份）');
+  assert.equal(out.queued, true, '不合并的唯一正确结局是照常入队 —— 绝不能静默丢掉这一份');
+  assert.equal(queue.size, 2, '队列里两份都在（回合 3 + 回合 4）：' + queue.size);
+  assert.equal(queue.snapshot().merged, 0, '合并计数不许涨：' + JSON.stringify(queue.snapshot()));
+  assert.equal(queue.snapshot().dropped, 0, '「没合并」不等于「被丢弃」：' + JSON.stringify(queue.snapshot()));
+  assert.ok(
+    !logs.some((m) => m.includes('复盘排队——新回合的复盘并进已在排队的那一份')),
+    '没合并就不许打合并日志：' + logs.join(' | '),
+  );
+
+  releaseFirst();
+  await sleep(60);
+  assert.deepEqual(summaries, ['回合 2', '回合 3', '回合 4'], '三份都要跑到（既没被合并吃掉、也没被丢掉）：' + JSON.stringify(summaries));
 });

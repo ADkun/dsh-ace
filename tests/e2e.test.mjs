@@ -619,7 +619,7 @@ test('E2E 场景5b｜满额先合并：LLM 合成一条、保留更早那条的 
   });
   const agent = makeAgent();
 
-  // 这一回合复盘产出 0 候选，走的是 lib/recap-pipeline.js:150-170 的「0 候选回合仍做容量治理」分支，
+  // 这一回合复盘产出 0 候选，走的是 lib/recap-pipeline.js 的 runRecapPipeline「0 候选回合仍做容量治理」分支，
   // 它只为腾位而合并、不落候选，所以日志是「合并结果未落盘」而不是「合并成功」——
   // 判据只看盘：合并确实发生了（活跃降到 1 条），而不是看某一行日志。
   await runTurn(host, agent, {

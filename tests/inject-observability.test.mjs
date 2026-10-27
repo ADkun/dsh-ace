@@ -36,7 +36,7 @@ const STUBS = {
     'export default { string: () => chain(), boolean: () => chain(), number: () => chain(), object: () => chain() };',
   '@deepseek-ai/dsh-tools': 'export function defineTool(options) { return options; }',
   // 第 40 轮 R5：宿主 createUserMessage 加一个**盘外开关**。
-  // 投递层「经验造不出来」这条失败路径（lib/inject-delivery.js:159-167 的 catch）
+  // 投递层「经验造不出来」这条失败路径（lib/inject-delivery.js 的 catch）
   // 在真实形状下无法靠喂畸形 decision 触发（messages 有数组防御），
   // 这是唯一能确定性复现它的手段，且只在用例期间打开。
   '@deepseek-ai/dsh-llm':
@@ -174,7 +174,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function waitFor(predicate, label, { timeout = 4000, interval = 10 } = {}) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
-    // 预检索跑在 IIFE 里（lib/index.js:824 起的 void (async () => ...)），
+    // 预检索跑在 IIFE 里的 void (async () => ...)（lib/index.js），
     // 判定必须允许异步探针，否则等不到它落账就往下走。
     if (await predicate()) return true;
     await sleep(interval);
@@ -288,7 +288,7 @@ test('R1｜自动复盘与自动反思都关掉时：handled 照数，但每一�
   //   assert.equal(stats.stalled, true, '进了 handler 但一个批次都没有 = 链路无产出（这就是判据）');
   // 为什么它是错的：stalled 的判据只看了「handled > 0 && batches === 0」，而这一场里 batches 恒为 0
   // 的唯一原因是**用户自己在设置里关掉了自动复盘与自动反思**——每次事件都在 flagsOff 那一行早退，
-  // 一次预检索都没发生。同一条 handler 分支（lib/index.js:882）对 flagsOff 早退的处理是**不**计数
+  // 一次预检索都没发生。同一条 handler 分支（lib/index.js 的 agent/inbox/inserted）对 flagsOff 早退的处理是**不**计数
   // （stall.noProduce 保持 0），于是同一份 /stats 数据自相矛盾：stall.noProduce 说一切正常，
   // 并列的 stalled 却说链路无产出。真正的「链路无产出」必须排除 flagsOff（handled > flagsOff），
   // 否则最会把排障的人带偏的正是这个布尔——他关掉自动功能就会看到 stalled=true。
@@ -444,7 +444,7 @@ test('R5｜连续 5 次「发布了批次但一次都没投递成功」→ turn-
   const agent = makeAgent();
 
   // 投递层「造不出用户消息」是盘上唯一能确定性触发的失败：宿主 createUserMessage 抛错
-  // ⇒ lib/inject-delivery.js:159-167 的 catch（failed + failures.deliver + stall.deliverySilent）。
+  // ⇒ lib/inject-delivery.js 的 catch（failed + failures.deliver + stall.deliverySilent）。
   globalThis.__ACE_CREATE_USER_MESSAGE_BOOM__ = true;
   try {
     for (let i = 1; i <= 5; i += 1) {
@@ -690,7 +690,7 @@ const agentWithId = (id, origin = 'cli') => ({ ...makeAgent(origin), id });
 /**
  * 第 43 轮 A 的用例公用：灌 count 本「各自连错 1 次」的账（每本 noProduce=1）。
  * 走的是真生产路径 —— 消息与手册零字面交集 ⇒ 挑不出候选 ⇒ failures.empty +1、
- * earlyReturn.noAgentPicked +1、该 agent 自己的 noProduce +1（lib/index.js:996-1006）。
+ * earlyReturn.noAgentPicked +1、该 agent 自己的 noProduce +1（lib/index.js 的预检索记账区）。
  * 每个 agent 都带非空 id，所以 warn 点名的标签是可断言的短名。
  */
 function spamNoProduceAgents(host, count, label) {

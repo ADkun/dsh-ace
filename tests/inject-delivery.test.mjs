@@ -243,3 +243,26 @@ test('第28轮｜payload 里没有 agent 时原样返回（不抛）', async () 
   assert.equal(r.counters.appended, 0);
   assert.equal(r.counters.failed, 0);
 });
+
+test('第45轮③a｜noText 桶：批次的 ids 非空、但注入块正文是空白 ⇒ 进 noText、原样返回、不投递也不记账', async () => {
+  // 这一桶此前零用例覆盖（第 45 轮审计点名）。触发条件很窄：flow.take() 只要求 ids 非空，
+  // 正文空白要在 take 之后才判 —— 所以本用例直接对真件（injection-flow + inject-delivery）
+  // 投一批「ids 非空 + text 全空白」的批次。
+  //
+  // 为什么必须这样造：生产路径经 lib/index.js 挑不出这种批次 —— selectInjection 挑不出候选时
+  // 走的是 count===0 的 noAgentPicked，正文恒非空；noText 只在投递层独立成立时命中。
+  // 这一桶进 GET /api/dsh-ace/stats 的通道是真的：lib/index.js 的 injectionSnapshot() 原样展开
+  // injectionStats.earlyReturn.by，所以这里用同形状的 stats 桩。
+  const stats = { batches: 0, appended: 0, skipped: 0, failed: 0, earlyReturn: { by: {} } };
+  const r = rig({ stats });
+  const agent = mainAgent();
+  r.flow.publish(agent, 'id:msg-notext', { text: '   \n  ', ids: ['ace-001'], tokens: 1, count: 1 });
+  const base = decision();
+  const out = await r.delivery.onPreStep({ agent }, async () => base);
+
+  assert.equal(out, base, '原样返回宿主决策（早退绝不许改 messages）');
+  assert.equal(stats.earlyReturn.by.noText, 1, '要落进 noText 桶 —— 否则「投递接缝到了却一条都没追加」查不到是哪一关挡的');
+  assert.equal(stats.appended, 0, '没投递就不许记 appended');
+  assert.equal(stats.failed, 0, 'noText 是早退，不是失败（失败走 failures 那块）');
+  assert.deepEqual(r.ledger.peek(agent), [], '没追加进历史就不许记账（否则留下幽灵注入）');
+});

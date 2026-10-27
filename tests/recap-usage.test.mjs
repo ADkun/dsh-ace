@@ -13,7 +13,7 @@
 // 「回合边界取空账本 + 一次原子写盘」的骨架，按新语义重写。
 //
 // 全部真跑生产模块：createRecapController（真控制器）、createUsageLedger（真账本）、
-// commitMeta + markHits（与 lib/index.js 的 recordHits 是同一组合，见 lib/index.js:733-750）。
+// commitMeta + markHits（与 lib/index.js 的 recordHits 是同一组合）。
 // 手册落在 os.tmpdir() 下的临时目录，写入走生产的 withExclusiveLock + writeFileAtomic，
 // 绝不碰真实手册。
 
@@ -116,7 +116,7 @@ function makeAgent() {
   };
 }
 
-/** 与 lib/index.js:733-750 的 recordHits 同一组合：读快照 → commitMeta → markHits。 */
+/** 与 lib/index.js 的 recordHits 同一组合：读快照 → commitMeta → markHits。 */
 async function defaultFlush(file, { ids }) {
   const snapshot = await readPlaybookSnapshot(file);
   return commitMeta(file, snapshot, {
@@ -144,7 +144,7 @@ function makeHarness({ file, config = {}, runRecap, takeHitIds, flushHits } = {}
     getConfig: () => ({ autoRecap: true, autoRecapThreshold: 1, autoRecapCooldownTurns: 0, ...config }),
     logger,
     takeHitIds: (a) => { calls.take += 1; return (takeHitIds || ((x) => ledger.take(x)))(a); },
-    // 与 lib/index.js:600-601 的生产接线同款：写盘失败时调度器借这个通道把 ids 写回账本。
+    // 与 lib/index.js 的生产接线同款（`noteHitIds`）：写盘失败时调度器借这个通道把 ids 写回账本。
     noteHitIds: (a, ids) => { calls.note.push({ agent: a, ids: ids.slice() }); ledger.note(a, ids); },
     flushHits: async (payload) => {
       calls.flush.push(payload);

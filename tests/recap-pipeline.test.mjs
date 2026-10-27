@@ -612,3 +612,45 @@ test('冲突与归档同批｜快照过期导致某条 op 冲突：其余 op 照
   assert.equal(archive[0].archive.reason, 'evicted');
   await cleanup(dir);
 });
+
+// —— 第 45 轮③d：补齐检查点③（commitOps 之前）的专门用例 ——
+// 已有的检查点②只证明「合并之前 abort 不花 LLM 调用」；「合并已经花过了、落盘之前 abort」这一段此前没有用例。
+
+test('第45轮③d｜检查点③：合并真的跑过之后、commitOps 之前 abort → 手册与归档都一字不动', async () => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const dir = await makeDir('abort-3');
+  const file = path.join(dir, 'playbook.md');
+  const archiveFile = path.join(dir, 'archive.md');
+  // 满额：2 条 > 上限 1 ⇒ 必走「先合并、再淘汰、最后落盘」那条路径（检查点②放行、检查点③在 commitOps 之前）。
+  await writePlaybook(file, [SIMILAR_A, SIMILAR_B]);
+  const before = await fs.readFile(file, 'utf8');
+  const controller = new AbortController();
+  let mergeCalls = 0;
+  let releaseMerge;
+  const mergeGate = new Promise((resolve) => { releaseMerge = resolve; });
+  const { deps, seen } = makeDeps(file, {
+    maxEntries: 1,
+    reflectRound: async () => [C('新的经验', '做法')],
+    // 合并卡在可控的 gate 上：这样才能确定 pipeline 已经越过检查点②、还没到检查点③。
+    mergeAsk: async () => { mergeCalls += 1; await mergeGate; return MERGED_JSON; },
+  });
+  const pipeline = runRecapPipeline(deps, { agent: { name: 'test-agent' }, summary: 's', signal: controller.signal });
+  for (let i = 0; i < 200 && mergeCalls === 0; i += 1) await sleep(5);
+  assert.equal(mergeCalls, 1, '前置：合并 LLM 确实被调用过一次（否则这条用例钉不到检查点③）');
+
+  controller.abort(new Error('复盘超过总时限'));
+  releaseMerge();
+
+  await assert.rejects(() => pipeline, /复盘超过总时限/, 'abort 必须原样上抛（检查点只在锁外，锁内绝不抛中断）');
+  assert.equal(seen.written.length, 0, 'commitOps 一次都没执行：落盘钩子不许被调用');
+  assert.deepEqual(seen.archived, [], '归档钩子一次都没跑（不许留下「手册没写、归档写了」的半截状态）');
+  assert.equal(await fs.readFile(file, 'utf8'), before, '手册必须一字未动');
+  let archiveText = null;
+  try {
+    archiveText = await fs.readFile(archiveFile, 'utf8');
+  } catch {
+    archiveText = null;
+  }
+  assert.equal(archiveText, null, '归档文件根本不该被创建');
+  await cleanup(dir);
+});

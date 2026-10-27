@@ -231,7 +231,7 @@ function stripCommentsAndStrings(src) {
     // 正则字面量：里面的 `foo(` 是**字面量内容**，不是调用（review6 §3.1 通道 O 的误报）。
     // 必须在除号分支之前判掉：`a / b` 的 `/` 上一个字符是标识符，regexCanStartAfter 会说不。
     // `//` 与 `/*` 一定是注释放，绝不能进正则试探（否则 `//…` 会被当成一个空正则，
-    // 整行注释的正文留在 out 里变成「代码」—— 实测 lib/index.js:1087 的注释就因此漏出的 `trim(` 误报）。
+    // 整行注释的正文留在 out 里变成「代码」—— 实测 lib/index.js 里 `rawInput` 那段注释就因此漏出的 `trim(` 误报）。
     if (ch === '/' && nx !== '/' && nx !== '*' && regexCanStartAfter(out)) {
       // 先只**试探**到配对的 `/`：找到了才当正则抹掉。没找到、或者中途撞上
       // `;` `{` `}` 换行（那时它更像除号）就退回普通字符，免得把整份代码吞进一个假正则。
@@ -958,7 +958,7 @@ test('接线｜满额路径：maxEntries 必须真的管住写入（不许静默
 });
 
 test('接线｜满额路径：resolveMaxEntries 把 undefined / 0 / NaN 收敛成默认上限，绝不当成「不限」', async () => {
-  // overflowsCapacity 把非有限值/<=0 当「不限」（lib/playbook.js:431-434），
+  // overflowsCapacity 把非有限值/<=0 当「不限」（lib/playbook.js 的 overflowsCapacity），
   // 于是接线漏传 maxEntries 就会让容量上限整个失效。流水线入口必须兜住。
   const warns = [];
   const logger = { warn: (m) => warns.push(String(m)) };

@@ -732,7 +732,7 @@ test('i2｜建议修6：淘汰计划返回不可用结果（不是数组）→ �
 
 // —— j：缺陷 4（第 40 轮）——「归档写成功、手册写失败」留下的错位必须自愈 ——
 //
-// 现场（lib/commit.js:246-249 与 :333-334）：锁内顺序是「先 appendArchivedEntries 写 archive.md，
+// 现场（lib/commit.js 的 commitOps）：锁内顺序是「先 appendArchivedEntries 写 archive.md，
 // 再 writeFileAtomic 写手册」。手册那一步真失败之后，盘上留下的是错位 —— 归档文件说它已经归档，
 // 手册活跃区还列着它。后果有两个：下一轮复盘会把它**再归档一次**（重复归档），人也分不清哪边是真的。
 //
@@ -1249,6 +1249,50 @@ test('j10｜第 43 轮低-3：归档长期不可读时同一路径只 warn 一�
       logs.filter((m) => m.startsWith('dsh-ace: 归档文件读取失败')).some((m) => m.includes(otherArchive)),
       '第二行 warn 必须带上新路径（证明两行不是同一句重复）：' + JSON.stringify(logs),
     );
+  } finally {
+    await cleanup(dir);
+  }
+});
+
+test('第45轮③c｜warnArchiveReadFailure：logger.warn 自己抛错 ⇒ 不记账、下次同路径仍会 warn（提交照常成功）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ace-archive-warnthrow-'));
+  try {
+    const file = path.join(dir, 'playbook.md');
+    const archiveFile = path.join(dir, 'archive.md');
+    const STAMP = '2026-10-24T09:00:00.000+08:00';
+    // 与 j9 / j10 同一个触发法：归档路径是目录 ⇒ readArchiveSnapshot 抛 EISDIR。
+    await fs.mkdir(archiveFile, { recursive: true });
+    await fs.writeFile(file, [
+      '# ACE 操作手册', '',
+      '### [ace-001] 现有条目',
+      '- 条件：c-a1',
+      '- 做法：a-a1',
+      '- 元数据：created=' + STAMP + ' updated=' + STAMP + ' hits=0 lastHit=',
+      '',
+    ].join('\n') + '\n', 'utf8');
+
+    // 日志后端本身炸掉：warnArchiveReadFailure 内部 try/catch 吞掉这个错、**不把路径记进去重表**，
+    // 所以同一个不可读的归档下一次提交仍会尝试 warn 一遍（不是「静默」，也不是「报一次就再也不报」）。
+    let warnAttempts = 0;
+    const logger = { warn: () => { warnAttempts += 1; throw new Error('日志后端挂了'); } };
+
+    let threw = null;
+    try {
+      for (let i = 1; i <= 2; i += 1) {
+        const snapshot = parsePlaybook(await fs.readFile(file, 'utf8'));
+        const out = await commitOps(file, { entries: snapshot.entries }, [{ op: 'add', title: '新条目' + i, condition: 'c' + i, action: 'a' + i }], 10, {
+          archiveFile, today: STAMP, logger,
+        });
+        assert.ok(out, '第 ' + i + ' 次提交照常返回（日志炸掉绝不许影响控制流）');
+      }
+    } catch (e) {
+      threw = e;
+    }
+    assert.equal(threw, null, 'logger.warn 抛的错绝不许冒到调用方：' + (threw && threw.message));
+    assert.equal(warnAttempts, 2, 'warn 抛错 ⇒ 去重表没记上账，两次读归档失败各试了一遍 warn：' + warnAttempts);
+
+    const parsed = parsePlaybook(await fs.readFile(file, 'utf8'));
+    assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001', 'ace-002', 'ace-003'], '候选照常落盘（与去重记账无关）');
   } finally {
     await cleanup(dir);
   }
