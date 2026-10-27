@@ -892,3 +892,86 @@ try 块（`if (archiveFile)` 先挡掉了），所以 `keyed` 永远是非空字
 **未验证**：没有在真实 DSH 宿主上端到端跑过任何一条；`injection.handled` 在真机上是否为 0（即失效根因到底是哪一种）
 需要真实实例读 `/api/dsh-ace/stats` 才能坐实，本轮没做（不许重启 DSH）；缺陷 4 的 EPERM 没有真复现成「跨两次提交」的因果链；
 `mergedOnce` 上限对真实复盘节奏的影响、`/ace` 新文案在真实交互里的呈现、notice 在真宿主里会不会被用户看到，都没测。
+
+## 第 45 轮：满额复盘 120s 必超时的结构性死因——配对 O(N²) 全语料重扫 + LLM 无预算贯通
+
+用户症状：手册攒满 100 条（`maxEntries=100`）之后，**每一次**自动复盘都触发「复盘超过总时限 120000ms」，
+且合并从未成功过。根因有两层，本轮一并修：
+
+- **纯 CPU 层（致命）**：`findMergePairs`（lib/merge-llm.js）对每条条目 a 调
+  `computeMergeSuggestions(others,[a])`，后者内部对 99 条各做一次 `bodyRatio`、每个 `bodyRatio`
+  又打 2 次 `scoreEntries`（100 文档语料）——满额一轮就是 **≈19,900 次全语料 BM25 打分**。真实 100 条
+  手册实测 **78–110s**，纯同步 CPU 阻塞事件循环；而总时限只有 120s（`RECAP_TOTAL_DEADLINE_MS`，
+  第 39 轮定的）。也就是说合并的 LLM 调用**从未开跑**，配对就已经吃满了预算 → 队列 abort → 检查点③
+  抛错 → 什么都不落盘 → 手册还是满的 → 下一回合再来一遍。这条死循环用只读探针在真实手册上实测坐实
+  （本轮不写手册内容进文档，数字见 FIX-REPORT-R45.md）。
+- **LLM 层（次生）**：即使配对瞬时完成，3 轮复盘 + 5 轮合并的理论最坏 8 次串行调用（单次上限 75s）
+  也没有任何一环知道自己还剩多少预算——复盘轮可以把合并的口粮吃光，合并轮可以把落盘的保底吃光。
+
+### R3：scoreEntries 加 tf 缓存（lib/playbook.js，纯缓存，打分口径一字未改）
+
+第 38 轮缓存了「term→df」与分词，tf 仍是每查询现算——对注入（每回合 1 个 query）够用，对配对矩阵
+（同一语料打 N 次分）是重复劳动的大头。本轮把 df 缓存升级成 **tf 子缓存**：`TF_CACHE_TOTAL = 2_000_000`
+按语料大小摊上限（`tfLimit = max(1024, ⌊2e6/N⌋)`），超限**整块 clear**（沿用第 38 轮的整块淘汰模式，
+没有无界 Map，不新增落盘文件）。`termFreqsOf(idx, term)` 一次扫全语料同时得出 df 与每个文档的 tf，
+`countOccurrences(>0)` 与旧 df 判据 `d.includes(term)` 数学恒等；BM25 公式、非重叠 tf、同分排序**一字未动**，
+第 38 轮的朴素实现对照用例（独立打分锚）原样守着口径——变异自证实测：把缓存里的 tf 恒写成 1，
+只有那把独立锚会红，同源的矩阵对照锚不红（两侧共用生产打分，同源漂移互相抵消）。
+
+### R4：配对矩阵原语 computePairRatios / pairRatioAt（lib/merge.js）
+
+一次 `computePairRatios(entries)` 建好全量投影语料，对每条有正文的条目用**它自己的正文当 query** 打一次
+`scoreEntries` → 得到「每条的正文在全语料上的得分行」（`rows[i]`，空正文为 `null`）与 `selfs[i]`。
+`pairRatioAt(ratios,i,j) = min(rows[i][j]/selfs[i], rows[j][i]/selfs[j])`，空正文/零自分 → 0、钳到 1——
+与 `bodyRatio` 判据**逐位一致**（测试用旧算法重抄的锚逐格比对 25 对全等；钳 1 用手工 stub 钉死，
+真实语料里「双向比率都超 1」几乎不会自然出现，牙齿必须是构造出来的）。
+**与旧实现唯一的语义差别**：旧 `findMergePairs` 每选出一对就把两条摘出候选集，后续配对语料随之缩小
+（idf/N/avgdl 微变）；矩阵版固定全量语料。第一对之前逐位一致，之后有 ±0.001 级 idf 微漂移——真实手册
+实测三对配对完全一致、比率在小数第三位漂移且同侧过阈。要「逐位复刻旧漂移」等于回到 O(N²)，不采纳。
+`findMergePairs`（lib/merge-llm.js）改为矩阵版贪心：一次建矩阵，i 升序取最优配偶（跳过已用、严格 `>`
+取首个最大、`>= thresholdRatio` 才成对），贪心次序与旧实现逐字同构。实测 100 条手册
+**78–110s → 53ms（≈1600×）**，`computeMergeSuggestions(99+1)` 966ms → 241ms。
+
+### 缺陷 7：合并与反思的 LLM 调用没有预算约束（预算贯通链）
+
+新增预算管道，每一跳都可核算剩余时间，全部向后兼容（老调用方拿不到第二参时行为不变）：
+
+- `lib/recap-queue.js`：`drain()` 给上游第二参 `{ deadlineAt: startedAt + totalDeadlineMs }`
+  （绝对截止时刻，第二参是新增、可忽略）。
+- `lib/recap-pipeline.js`：`makeRecapBudget(deadlineAt)` → `{ enabled, remaining(), sliceFor(reserveMs) }`；
+  满额时给合并阶段预留 `MERGE_PHASE_RESERVE_MS = 40_000`，落盘保底 `MERGE_COMMIT_RESERVE_MS = 8_000`。
+  **反思轮的预算闸**：轮前算 `maxMs = sliceFor(合并预留 + 落盘保底)`，低于 `MERGE_MIN_CALL_MS = 10_000`
+  就抛「ace: LLM 调用超时（复盘剩余预算不足 Nms，要留给合并与落盘），第 R 轮不再发起」——
+  `lib/reflect.js` 的 `isTimeoutError` 认这个前缀，按**已提炼候选**收尾（本轮已产出的候选照常落盘，
+  不是空手）。
+- `lib/merge-llm.js`：`planMerges` 每轮开头看 `remaining() - 8s`，不足 10s 就 warn
+  「合并剩余预算不足（还剩 Nms），停止发起新的合并对，已合并 M 对照常落盘」+ break——
+  **只停、不抛、不吞部分结果**（红线 12 原样）；预算够时把本次调用的上限 `maxMs` 交给 LLM 层。
+- `lib/llm.js`：`oneShot` 加 `maxMs` 参数，`capMs = min(ONESHOT_TIMEOUT_MS, maxMs)`，超时报错文案
+  用实际 cap（前缀「ace: LLM 调用超时（单次上限 Nms）」不变）。
+
+**「第一轮永不拦、不派 maxMs」是本轮最重要的行为决策**：首版把第一轮也纳入预算闸，recap-hang 用例
+立刻红 2——第一轮被拦后挂死 provider 不再被挂、单次上限没机会触发，而且「预算紧就空手假成功」是绝对
+不可接受的（复盘连一个候选都没提炼就静默结束）。修成：第一轮（无 priorCandidates）永远真实发起、
+不带 maxMs；后续轮才受闸。变异自证 M1–M5（预算闸失效 / maxMs 失效 / tf 口径劣化 / 去钳 / 去第二参）
+全部红后复原，备份哈希逐文件核对 IDENTICAL。
+
+### 缺陷 8：满额路径的三处 computeMergeSuggestions 各自全量重打分（未单列修，并入 R3/R4）
+
+`decideCandidates` 每候选最多 2 次 + merge-inbox 1 次的 `computeMergeSuggestions(≈100+1)` 从 966ms
+降到 241ms（同一语料索引缓存 + tf 缓存全命中）；merge-inbox 语义不动（陈旧建议不在本轮范围）。
+
+### 这轮的测试与未验证
+
+净增 15 条：tests/merge.test.mjs（17→22，矩阵等价 + stub 钳 1 + 同配对 + 预算闸三条）、
+tests/recap-pipeline.test.mjs（21→26，第一轮不拦 + 第二轮闸抛按已有候选落盘 + maxMs 配比 + 无预算不变）、
+tests/recap-queue.test.mjs（10→11，第二参 deadlineAt）、tests/playbook.test.mjs（80→81，tf 冷热挤逐位一致）、
+新文件 tests/llm-budget.test.mjs（3 条，maxMs 生效/零值/正常流）。tests/trajectory.test.mjs 的源码级断言
+同步为 `executeRecap({ agent, summary, signal, deadlineAt: budget?.deadlineAt })`（:510/:520）。
+全量 **632 / 631 / 0 / 1 skip**（基线 c6791ab = 617 / 616 / 0 / 1）。落钉文件：FIX-REPORT-R45.md。
+
+**已知边界与未验证（如实声明）**：①真实宿主端到端未验证——全部证据来自单测（含真临时手册的整链用例
+与子进程 hang 用例）和真实手册只读探针；修复要重启 DSH 后观察一次满额复盘日志才算闭环，本环境不许
+重启宿主。②预算常量（40s/10s/8s）是按单次上限 75s 与真实手册规模推的保守值，不是真实 provider 时延
+的统计；若真实模型普遍单次 >72s，合并会因预算不足停发——那是「及时止损、已合并部分落盘」的正确行为，
+但合并成功率要在真机复核。③merge-inbox 的 2 条陈旧建议（指向已 superseded 条目）未修，超本轮范围。

@@ -2,7 +2,7 @@
 title: dsh-ace 测试指南
 owner: dsh-ace 维护者
 status: current
-last_reviewed: 2026-10-26
+last_reviewed: 2026-10-27
 ---
 
 # 测试
@@ -15,7 +15,7 @@ last_reviewed: 2026-10-26
 npm test
 ```
 
-当前 **546 条用例：545 通过 + 1 条在 Windows 上条件跳过（T47 文件权限位，见未验证清单 7）**，`duration_ms` 约 5.1–20s（`node --test tests/`，**34 个测试文件**，无网络无构建）。**第 33 轮「拆除正负评分 → 最少使用淘汰」净减 78 条**：整份删掉 tests/gate.test.mjs（19 条，三层可复用性闸门）与 tests/probation.test.mjs（13 条，考察位）；重写 tests/recap-usage.test.mjs（25 → 12 条，计分/结算/pendingIds 那一整层换成命中账本 + 回合边界落盘 + 毫秒时间戳）、tests/trigger.test.mjs（47 → 46 条，删 C2 三档信号整段）、tests/playbook.test.mjs（净分与归档区章节相关用例删掉）、tests/archive.test.mjs（40 → 21 条，三判据整层换成绩效判据 = 淘汰顺序 + 独立归档文件）、tests/inject.test.mjs（16 → 17 条，排序键换纯 BM25）、tests/injection-flow.test.mjs（9 → 8 条）、tests/recap-pipeline.test.mjs（20 → 12 条，候选过滤与合并/淘汰重写）、tests/e2e.test.mjs（7 → 8 条）；整份新增 tests/prompts.test.mjs（5 条），tests/merge.test.mjs 由 10 条扩到 17 条。
+当前 **632 条用例：631 通过 + 1 条在 Windows 上条件跳过（T47 文件权限位，见未验证清单 7）**，`duration_ms` 约 6.7s（`node --test tests/`，**40 个测试文件**，无网络无构建；第 45 轮起每轮施工后都要重跑全量并同步本行——红线 20，最新一轮明细见下方「第 45 轮」段落）。**第 33 轮「拆除正负评分 → 最少使用淘汰」净减 78 条**：整份删掉 tests/gate.test.mjs（19 条，三层可复用性闸门）与 tests/probation.test.mjs（13 条，考察位）；重写 tests/recap-usage.test.mjs（25 → 12 条，计分/结算/pendingIds 那一整层换成命中账本 + 回合边界落盘 + 毫秒时间戳）、tests/trigger.test.mjs（47 → 46 条，删 C2 三档信号整段）、tests/playbook.test.mjs（净分与归档区章节相关用例删掉）、tests/archive.test.mjs（40 → 21 条，三判据整层换成绩效判据 = 淘汰顺序 + 独立归档文件）、tests/inject.test.mjs（16 → 17 条，排序键换纯 BM25）、tests/injection-flow.test.mjs（9 → 8 条）、tests/recap-pipeline.test.mjs（20 → 12 条，候选过滤与合并/淘汰重写）、tests/e2e.test.mjs（7 → 8 条）；整份新增 tests/prompts.test.mjs（5 条），tests/merge.test.mjs 由 10 条扩到 17 条。
 **本会话第三轮「3 条验收遗留项修复」再净增 4 条（T188–T191）**：tests/trajectory.test.mjs 由 23 条增至 25 条（+2：退化分支的省略数恒等于真实丢弃数、整条 summary ≤ maxChars）、tests/trigger.test.mjs +2（await 窗口内挂上新待办时旧 pending 回滚不吞新待办、同一份待办重复放弃只生效一次）。总数从 238 → 242（241 通过 + 1 skip）。语法自检同前：每个 `lib/*.js` 跑 `node --check`，`package.json` 以 `JSON.parse` 校验。
 **本会话第四轮「3 条验收新缺陷修复」再净增 7 条（T192–T198）**：tests/trigger.test.mjs 由 23 条增至 27 条（+4：新待办已被另一个空闲边沿取走时迟到回滚被拒、`restorePendingMutCount` 正常路径只还计数不回滚冷却、`restorePendingMutCount` 遇到更新的待办时一个字段都不动、requeue 后再次 take 同一份待办再放弃仍生效）、tests/recap.test.mjs 由 13 条增至 15 条（+2：失败分支只在待办仍归我时才还计数、两个空闲边沿交错时迟到的 skipped 回滚被拒且不谎报已还回）、tests/trajectory.test.mjs 由 25 条增至 26 条（+1：`maxChars` 小于计数行长度时以保证计数行完整为准）。总数从 242 → 249（248 通过 + 1 skip）。同时既有 3 条用例按新事实改期望（`createRecapState` 初始状态多了 `pendingSeq: 0`；`recordTurnEnd` 挂的待办多了 `seq`，T90/T190 与 recap 的「空闲边沿才真正触发复盘」同步），只换期望值、未放宽也未删除任何断言。语法自检同前：每个 `lib/*.js` 跑 `node --check`，`package.json` 以 `JSON.parse` 校验。
 **本会话第五轮「4 条自动复盘回滚缺陷修复」再净增 8 条（T199–T206）**：tests/trigger.test.mjs 由 27 条增至 33 条（+6：`requeuePendingRecap` 遇到更新的待办时明确拒绝放回、耗尽分支也不许抹掉队列里那份、`restorePendingMutCount` 幂等、两条回滚路径共用已结算账本、`requeuePendingRecap` 不算结算、`ownsPending` 旧形状兜底在代次已前进时一律不认），tests/recap.test.mjs 由 15 条增至 17 条（+2：撞忙回队时不覆盖更新待办且不谎报「已放回队列」、撞忙重试到上限时仍保留队列里那份更新的待办）。总数从 249 → 257（256 通过 + 1 skip）。**这一轮没有改动任何既有用例**：新增的所有权判定只拦「本就不归自己」的调用，既有手工构造旧形状待办的用例都走 `pendingSeq === 0` 那一档，全部照旧通过。语法自检同前：每个 `lib/*.js` 跑 `node --check`，`package.json` 以 `JSON.parse` 校验。
@@ -78,6 +78,11 @@ npm test
 - 新判据用例（下表标「第 33 轮」的那些）：a 注入投递 +1 且同一批不重复计数、b 只有带 query/id 的定向检索 +1（整本读取不计数）、c 满额先合并、d 合并失败跳过/全失败直接淘汰且落盘照常成功、e 淘汰顺序（hits → created → id）、f 淘汰进 archive.md 且腾位、g 手册里永不出现 `## 归档区`、h 整本读取不含归档条目、i 毫秒时间戳写入→读回→排序，j 空标题拒绝/非空放行，k 注入排序纯 BM25。
 - **三条守护用例（用户点名）**：①「同 hits 时老条目先走」（tests/archive.test.mjs，`compareForEviction` 三级顺序）；②「LLM 合并失败绝不许阻塞落盘」（tests/recap-pipeline.test.mjs）；③「毫秒时间戳跨进程仍能正确排序」（tests/recap-usage.test.mjs，两个独立子进程各算一遍）。
 - **变异自证十二条**（每条都真跑、跑完即复原）：M1 注入排序键加回 hits 优先 → k 红；M2 `compareForEviction` 删 created 判据 → 守护① + i + 守护③ 红；M2b 同 hits 改 id 降序 → e 红；M3 只拆外层 try/catch → 全绿（内层兜底），内外两层一起拆 → 守护② 红；M4 时间戳去掉毫秒 → 9 条红；M5 时间戳比较截到日 → i 与守护③ 红；M6 检索计数门改成恒真/恒假 → b 红；M7 手册与归档合成一次写 → 8 条红；M8 标题判据改成恒假 / 加回长度上限 → j 红；M9 `delivered` 去重失效 → a 三条红；M10 合并改成保留更晚那条 → c 等三条红；M11/M12 提示词删掉 BM25 段与反例 → prompts 两条红。
+
+**第 45 轮「满额复盘 120s 必超时修复：tf 缓存 + 配对矩阵 + LLM 预算贯通」净增 15 条 / 全量 632 条（631 通过 + 1 skip，约 6.7s）**：新增 tests/llm-budget.test.mjs 3 条（假 provider 挂到 signal abort 再 throw：maxMs 生效且报错文案用实际 cap「单次上限 80ms」、maxMs=0 当没传 + 外层 signal 先断原样 rethrow、预算之内正常流照常返回）；tests/merge.test.mjs 17 → 22（+5：`computePairRatios`+`pairRatioAt` 与旧 bodyRatio 重抄锚 25 对逐位等——锚必须先 `projectBody` 再比；手工 stub 钉死「双向比率都超 1 必须钳到 1、子 1 比率原样透传」；findMergePairs 矩阵版与旧实现同配对（3+1 条目仍只成 a↔b 一对）；planMerges 预算闸三条：起点不足 asked=0+warn、首对成功后预算见底只合并这一对且 failed=0 部分结果照常返回（红线 12）、无 budget 时 ask 不带 maxMs 老调用方不变）；tests/recap-pipeline.test.mjs 21 → 26（+5：预算见底时**第一轮照旧发起且不派 maxMs**、第二轮闸抛「复盘剩余预算不足…第 2 轮不再发起」+ 按已有候选落盘；预算充足每次调用带 maxMs（第一轮 ≈112s = 120s−8s 落盘保底）；满额扣合并预留（maxMs ≈72s = 120s−40s−8s）；无 deadlineAt 行为与旧版一致）；tests/recap-queue.test.mjs 10 → 11（+1：run 收到第二参 `{deadlineAt}` ≈ startedAt+totalDeadlineMs）；tests/playbook.test.mjs 80 → 81（+1：tf 缓存同语料冷 → 热 → 被挤掉再冷打分逐位一致）；tests/trajectory.test.mjs 条数不变但 :510/:520 源码级断言同步为 `executeRecap({ agent, summary, signal, deadlineAt: budget?.deadlineAt })`（只加字段未放宽）。
+- **这些用例对应的验收行为**（给读测试的人）：① 满额 100 条手册下配对是 O(N) 次全语料打分而不是 O(N²) 次（真实手册探针：findMergePairs(0.5) 78–110s → 53ms，配对完全一致、比率仅小数第三位 idf 微漂移且同侧过阈；computeMergeSuggestions(99+1) 966ms → 241ms）；② 预算见底时复盘「及时止损」——已有候选照常落盘、已合并的部分照常落盘，且**绝不空手假成功**（第一轮永不拦：预算再紧，一个候选都没有的复盘也必须真跑）；③ 单次 LLM 调用超时超的是**自己的 maxMs**（外层 signal 未断），报错前缀「ace: LLM 调用超时（单次上限 Nms）」不变，`lib/reflect.js` 的 `isTimeoutError` 仍认这个前缀按已提炼候选收尾。
+- **变异自证 M1–M5**（每条真跑、跑完逐字复原、备份哈希核对 IDENTICAL）：M1 planMerges 预算闸条件改恒不触发 → merge 红 2；M2 oneShot 忽略 maxMs → llm-budget 红 3；M3 tf 缓存的 tf 恒写 1 → **playbook 红 1（第 38 轮朴素实现独立打分锚抓住）**——如实记：merge 的矩阵对照锚不红，因为锚与被测共用同一个生产 scoreEntries、同源漂移互相抵消，口径的牙齿在独立锚上；M4 pairRatioAt 去掉钳 1 → merge 红 1（stub 钳 1 断言；真实语料里双向超 1 几乎不会自然出现，牙齿必须是构造出来的）；M5 recap-queue 去掉第二参 deadlineAt → recap-queue 红 1。另有 M0（自然发现）：首版把第一轮复盘也纳入预算闸 → recap-hang 红 2，修成「第一轮永不拦」后全绿。
+- 落钉文件：FIX-REPORT-R45.md（根因实测数字、性能表、已知边界：真实宿主端到端未验证、预算常量是推算值非真机统计、merge-inbox 陈旧建议未修）。
 
 ## 桩宿主包真 import lib/index.js：为什么、桩哪几个、怎么驱动事件流
 
