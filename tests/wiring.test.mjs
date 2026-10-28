@@ -170,13 +170,23 @@ function configDefaults() {
   return out;
 }
 
-/** 造一个假 req/res，把 HTTP 路由真的打一发（handler 是 lib/index.js 里注册的那个）。 */
-async function callRoute(handler, method, urlPath) {
+/**
+ * 造一个假 req/res，把 HTTP 路由真的打一发（handler 是 lib/index.js 里注册的那个）。
+ * options.body：给了就按 JSON 发一次 'data' 事件（写路由要读 readJson）；
+ * options.headers：覆盖默认请求头（围栏拒绝用例要伪造 Host / Origin）。
+ */
+async function callRoute(handler, method, urlPath, options = {}) {
+  const headers = { host: '127.0.0.1:3080', ...(options.headers || {}) };
+  const payload = options.body === undefined ? null : Buffer.from(JSON.stringify(options.body));
   const req = {
     method,
     url: urlPath,
-    headers: { host: '127.0.0.1:3080' },
-    on: (event, cb) => { if (event === 'end') cb(); return req; },
+    headers,
+    on: (event, cb) => {
+      if (payload && event === 'data') { cb(payload); return req; }
+      if (event === 'end') cb();
+      return req;
+    },
     destroy: () => {},
   };
   const res = {
@@ -974,6 +984,275 @@ test('接线｜满额路径：resolveMaxEntries 把 undefined / 0 / NaN 收敛�
   assert.equal(resolveMaxEntries(1000, logger), 1000);
   assert.equal(warns.length, 7, '合法值不该 warn');
 });
+
+
+// —— 手动归档（POST /entries/archive）：唯一的新增写路由 ——
+//
+// 判据全部落在行为与**磁盘**上：活跃区少一条、archive.md 多一条且 reason='removed-by-request'、
+// 正文一个字不丢、ID 高水位不许复用、/stats 的 runtime 与日志数字对得上。
+// 每个用例一个独立子目录（archive.md 从手册路径同目录派生，共用目录会互相污染归档）。
+const ARCHIVE_DIR = path.join(ROOT, 'manual-archive');
+
+async function archiveFixture(name, entries, header) {
+  const dir = path.join(ARCHIVE_DIR, name);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybookFile(file, header || ['# ACE 手记', ''], entries);
+  const { ctx, record } = fakeCtx(async function* () { yield { type: 'text-delta', index: 0, text: '{}' }; });
+  const config = configDefaults();
+  config.playbookPath = file;
+  plugin.apply(ctx, config);
+  await new Promise((r) => setTimeout(r, 20));
+  const { callback } = record.injected.find((i) => i.deps.includes('webServer'));
+  const routes = [];
+  callback({ webServer: { register: (route) => routes.push(route) }, effect: (fn) => fn(), logger: ctx.logger });
+  return { file, dir, archiveFile: path.join(dir, 'archive.md'), route: routes[0], ctx, record };
+}
+
+test('手动归档｜POST /entries/archive 真落盘：活跃区少一条、archive.md 多一条 reason=removed-by-request、正文不丢', async () => {
+  const body = '依据正文要字字不丢，包括标点与换行前的空格：abc 123 ！';
+  const keep = entryBlock({ id: 'ace-001', title: '留下的那条', condition: '条件一', action: '做法一', created: dayString() });
+  const move = entryBlock({ id: 'ace-002', title: '要归档的那条', condition: '条件二', action: '做法二', rationale: body, created: dayString() });
+  const fx = await archiveFixture('basic', [keep, move]);
+
+  const res = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: 'ace-002' } });
+  assert.equal(res.status, 200, '成功必须是 2xx：' + JSON.stringify(res.body));
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.archived.id, 'ace-002');
+  assert.equal(res.body.archived.reason, 'removed-by-request', '归档原因由 applyOps 定死，不许新增第五种');
+  assert.equal(typeof res.body.archived.date, 'string');
+  assert.ok(res.body.archived.date.length > 0);
+
+  // 活跃区少一条（且留下的是另一条）
+  const parsed = parsePlaybook(fs.readFileSync(fx.file, 'utf8'));
+  assert.deepEqual(parsed.entries.map((e) => e.id), ['ace-001'], '活跃区必须只剩没被归档的那条');
+
+  // archive.md 里多一条，正文一个字不丢
+  assert.equal(fs.existsSync(fx.archiveFile), true, '归档文件必须真被建出来（appendArchivedEntries）');
+  const archived = (await readArchiveSnapshot(fx.archiveFile)).entries;
+  assert.equal(archived.length, 1);
+  assert.equal(archived[0].id, 'ace-002');
+  assert.equal(archived[0].title, '要归档的那条');
+  assert.equal(archived[0].rationale, body, '正文必须一个字不丢');
+  assert.equal(archived[0].archive.reason, 'removed-by-request');
+  assert.equal(archived[0].archive.date, res.body.archived.date, '响应里的 date 必须与落盘的一致');
+});
+
+test('手动归档｜归档后 ID 高水位仍算上归档侧：新条目绝不复用刚归档的编号', async () => {
+  // 手写手册（没有 ace:id-highwater 标记行）是最容易复用编号的场景：
+  // 活跃区只剩 ace-001，若只看活跃侧最大编号，下一条新增就会被分配成 ace-002 —— 正是刚归档的那个。
+  const a = entryBlock({ id: 'ace-001', title: '甲', condition: 'c1', action: 'a1', created: dayString() });
+  const b = entryBlock({ id: 'ace-002', title: '乙', condition: 'c2', action: 'a2', created: dayString() });
+  const fx = await archiveFixture('highwater', [a, b]);
+
+  const res = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: 'ace-002' } });
+  assert.equal(res.status, 200);
+
+  const curate = fx.record.tools.find((t) => t.name === 'ace_curate');
+  const value = await curate.execute({
+    ops: [{ op: 'add', title: '新加的一条', condition: 'c3', action: 'a3', rationale: 'r3' }],
+  }, { agent: fakeAgent() });
+  assert.equal(value.added.length, 1);
+  assert.notEqual(value.added[0], 'ace-002', '新条目绝不许复用刚归档的编号（红线 7）');
+  assert.equal(value.added[0], 'ace-003', '高水位必须把归档侧最大编号也算进去');
+
+  const activeIds = parsePlaybook(fs.readFileSync(fx.file, 'utf8')).entries.map((e) => e.id);
+  assert.deepEqual(activeIds, ['ace-001', 'ace-003']);
+});
+
+test('手动归档｜记账与日志：/stats 的 runtime.archivedByReason 与内存计数、日志数字三者对得上', async () => {
+  const fx = await archiveFixture('stats', [
+    entryBlock({ id: 'ace-001', title: '甲', condition: 'c1', action: 'a1', created: dayString() }),
+    entryBlock({ id: 'ace-002', title: '乙', condition: 'c2', action: 'a2', created: dayString() }),
+  ]);
+  const before = await callRoute(fx.route.handler, 'GET', '/api/dsh-ace/stats');
+  assert.equal(before.body.runtime.archived, 0);
+
+  const res = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: 'ace-002' } });
+  assert.equal(res.status, 200);
+
+  const after = await callRoute(fx.route.handler, 'GET', '/api/dsh-ace/stats');
+  assert.equal(after.body.runtime.archived, 1);
+  assert.equal(after.body.runtime.archivedByReason['removed-by-request'], 1);
+  // 七键协议不许加键不许删键
+  assert.deepEqual(Object.keys(after.body.runtime).sort(), [
+    'archived', 'archivedByReason', 'evicted', 'injectedAppended', 'injectedBatches', 'merged', 'retrievalHits',
+  ]);
+
+  // 日志里的数字必须与 /stats 一致（红线 9）
+  const lines = fx.record.logs.info.filter((m) => m.includes('手动归档 1 条（ace-002'));
+  assert.equal(lines.length, 1, '记完账必须补一条 dsh-ace: 前缀 info 日志，实际：' + JSON.stringify(fx.record.logs.info));
+  assert.ok(lines[0].startsWith('dsh-ace: '), '日志前缀必须是 dsh-ace: ：' + lines[0]);
+  assert.ok(lines[0].includes('累计归档 1 条'), '日志数字必须与 /stats 的 archived 对得上：' + lines[0]);
+  assert.ok(lines[0].includes('removed-by-request 1 条'), '日志数字必须与 /stats 的分列对得上：' + lines[0]);
+});
+
+test('手动归档｜失败路径一律结构化非 2xx，绝不 500 拖垮整页', async () => {
+  const fx = await archiveFixture('failures', [
+    entryBlock({ id: 'ace-001', title: '甲', condition: 'c1', action: 'a1', created: dayString() }),
+  ]);
+
+  // ① 不存在的 id → 404
+  const missing = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: 'ace-999' } });
+  assert.equal(missing.status, 404);
+  assert.equal(typeof missing.body.error, 'string');
+
+  // ② 非法 id 形状（含非字符串、空串、缺字段）→ 400。
+  // 注意：首尾空白是**故意**先 trim 再校验的（'  ace-001  ' 视同 ace-001），
+  // 所以空白串是非法、带空白的合法 id 是合法 —— 下面两条分别钉住。
+  for (const bad of ['ace-', 'ace-abc', '001', 'ace-001x', '', '   ', 7, null, undefined]) {
+    const res = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: bad } });
+    assert.equal(res.status, 400, '非法 id ' + JSON.stringify(bad) + ' 必须 400，实际 ' + res.status);
+    assert.equal(typeof res.body.error, 'string');
+  }
+  // 请求体整个不是 JSON 对象（readJson 一律回落 {}）→ 还是 400，不是 500
+  const noBody = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive');
+  assert.equal(noBody.status, 400);
+
+  // ③ GET 该路由 → 405（本路由只写不读），且 /entries 的 GET 语义没被污染
+  const getArchive = await callRoute(fx.route.handler, 'GET', '/api/dsh-ace/entries/archive');
+  assert.equal(getArchive.status, 405);
+  const listAfter = await callRoute(fx.route.handler, 'GET', '/api/dsh-ace/entries');
+  assert.equal(listAfter.status, 200);
+  assert.equal(listAfter.body.ok, true);
+  assert.deepEqual(listAfter.body.entries.map((e) => e.id), ['ace-001'], '失败路径一条都不许动盘');
+
+  // ④ 围栏拒绝：非回环 Host → 403，且 /stats 也拒绝（围栏没被放松）
+  const fenced = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', {
+    body: { id: 'ace-001' },
+    headers: { host: 'evil.example.com' },
+  });
+  assert.equal(fenced.status, 403);
+  assert.equal(fenced.body.error, 'forbidden');
+  // cross-site 也照样拒
+  const crossSite = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', {
+    body: { id: 'ace-001' },
+    headers: { 'sec-fetch-site': 'cross-site' },
+  });
+  assert.equal(crossSite.status, 403);
+  // 围栏前失败：条目依旧是活的
+  assert.deepEqual(
+    parsePlaybook(fs.readFileSync(fx.file, 'utf8')).entries.map((e) => e.id),
+    ['ace-001'],
+    '围栏拒绝后条目绝不许被归档',
+  );
+
+  // ⑤ 首尾空白被 trim 后是合法 id —— 不是绕过，只是宽容；它照样要真的把条目归档。
+  // 放在最后：这一发是真的成功写盘，前面的「一条都没动」断言必须先跑完。
+  const padded = await callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: '  ace-001  ' } });
+  assert.equal(padded.status, 200, '带首尾空白的合法 id 应当被 trim 后正常归档：' + JSON.stringify(padded.body));
+  assert.equal(padded.body.archived.id, 'ace-001');
+  assert.deepEqual(parsePlaybook(fs.readFileSync(fx.file, 'utf8')).entries.map((e) => e.id), []);
+});
+
+test('手动归档｜409：并发窗口里两个请求归档同一条，后到的必须 409，且成功的痕迹一个都不许多出来', async () => {
+  // 守的变异：lib/index.js:2015 的 `if (!result.removed.includes(id))` 改成 `if (false)`。
+  // 真实并发、零桩件：两个设置页几乎同时点同一条的「确认」。两个请求都会先在锁外读到
+  // 「ace-002 还在」的快照（都过了 404 闸），然后 commitOps 排同一把写锁——
+  //   先拿到锁的：真的把 ace-002 搬进 archive.md（200）；
+  //   后到的：锁内重读发现 ace-002 没了，detectConflicts 判「快照有、现在没了」→
+  //   remove 落进 conflicts，result.removed 不含 ace-002 → 必须 409。
+  // 409 属于「什么都没归成」：错误体结构化 {error}、ok/archived 缺席，且与成功绑定的一切
+  // （archive.md 第二条、/stats 记账、成功日志）一个都不许有。
+  const keep = entryBlock({ id: 'ace-001', title: '甲', condition: 'c1', action: 'a1', created: dayString() });
+  const move = entryBlock({ id: 'ace-002', title: '乙', condition: 'c2', action: 'a2', created: dayString() });
+  const fx = await archiveFixture('race-409', [keep, move]);
+
+  // 先让一个外部写者占住写锁（独立异步根，不走路由的调用栈），两个请求就得在锁外把
+  // 快照都读完、一起卡进锁队列——这保证了「两个快照都读在任何写盘之前」，结果因此确定：
+  // 先出队的一个 200，后出队的一个 409，不存在「谁手快谁赢」的抖动。
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const holder = withExclusiveLock(fx.file, () => gate);
+  const pending = [
+    callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: 'ace-002' } }),
+    callRoute(fx.route.handler, 'POST', '/api/dsh-ace/entries/archive', { body: { id: 'ace-002' } }),
+  ];
+  try {
+    // 两个请求此刻都卡在锁队列上；留出时间让它们的锁外快照读完（本地临时文件，毫秒级）。
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  } finally {
+    release();
+  }
+  const results = await Promise.all(pending);
+  await holder;
+
+  assert.deepEqual(
+    results.map((r) => r.status).sort((a, b) => a - b),
+    [200, 409],
+    '并发归档同一条：恰好一个 200、一个 409，实际 ' + JSON.stringify(results.map((r) => ({ status: r.status, body: r.body }))),
+  );
+  const win = results[0].status === 200 ? results[0] : results[1];
+  const lose = results[0].status === 200 ? results[1] : results[0];
+  assert.equal(win.body.ok, true);
+  assert.equal(win.body.archived.id, 'ace-002');
+
+  // 409 的形状：结构化 { error }，文案带回 id，绝不许带 ok/archived
+  assert.equal(typeof lose.body.error, 'string', '409 必须是结构化 { error }，实际 ' + JSON.stringify(lose.body));
+  assert.ok(lose.body.error.includes('ace-002'), '错误文案里要带回 id，页面才说得清是哪一条：' + lose.body.error);
+  assert.equal(lose.body.ok, undefined, '409 绝不许带 ok:true（客户端会把它当成归档成功）');
+  assert.equal(lose.body.archived, undefined, '409 不许返回 archived 字段');
+
+  // 盘上：活跃区只剩 ace-001；archive.md 恰好一条 ace-002（409 那发一个字节都不许追加）
+  assert.deepEqual(parsePlaybook(fs.readFileSync(fx.file, 'utf8')).entries.map((e) => e.id), ['ace-001']);
+  const archived = (await readArchiveSnapshot(fx.archiveFile)).entries;
+  assert.equal(archived.length, 1, 'archive.md 只许有一条：409 那发不许再追加，实际 ' + archived.length);
+  assert.equal(archived[0].id, 'ace-002');
+  assert.equal(archived[0].archive.reason, 'removed-by-request');
+
+  // 记账与日志同属「只许成功一次」：/stats 只记 1、成功日志恰好一行、409 那发留一条 warn
+  const stats = await callRoute(fx.route.handler, 'GET', '/api/dsh-ace/stats');
+  assert.equal(stats.body.runtime.archived, 1, '两个请求只许成功一个：' + JSON.stringify(stats.body.runtime));
+  assert.equal(stats.body.runtime.archivedByReason['removed-by-request'], 1);
+  assert.equal(
+    fx.record.logs.info.filter((m) => m.includes('手动归档 1 条')).length,
+    1,
+    '成功日志恰好一行（红线 9：日志数字与 /stats 对得上）：' + JSON.stringify(fx.record.logs.info),
+  );
+  assert.equal(
+    fx.record.logs.warn.filter((m) => m.includes('手动归档未生效（ace-002）')).length,
+    1,
+    '409 那发必须留一条 warn：' + JSON.stringify(fx.record.logs.warn),
+  );
+});
+
+test('手动归档｜路由顺序是防御纵深：GET /entries/archive 恒 405（绝不被 /entries 分支接走），GET /entries 恒 200', async () => {
+  // 守的变异：lib/index.js:2038 的 `routePath === '/entries'` 改成 startsWith('/entries')。
+  // 现在不红，只是因为 :1990 的 '/entries/archive' 分支排在它前面先截住了 ——
+  // 这是**顺序**在兜底，不是分支自己站得住。顺序一旦被挪动，startsWith 就会把归档路由的 GET
+  // 当成列表读走（返回 200 + 条目清单），写路由的 405 语义静默消失。
+  // 所以这里一次钉两件事：归档路由的 GET 必须 405，列表路由的 GET 必须 200。
+  const fx = await archiveFixture('route-order', [
+    entryBlock({ id: 'ace-001', title: '甲', condition: 'c1', action: 'a1', created: dayString() }),
+  ]);
+
+  for (const method of ['GET', 'PUT', 'DELETE', 'PATCH']) {
+    const res = await callRoute(fx.route.handler, method, '/api/dsh-ace/entries/archive');
+    assert.equal(res.status, 405, method + ' /entries/archive 必须 405（本路由只写不读），实际 ' + res.status);
+    assert.deepEqual(Object.keys(res.body), ['error'], '405 的 body 必须是结构化 { error }，实际 ' + JSON.stringify(res.body));
+  }
+  // 上面每一发都不许被 /entries 分支当成列表读走：列表体带 ok/entries/total/maxEntries。
+  // 单独再钉一次形状：405 体里绝不许出现 entries 字段。
+  const getArchive = await callRoute(fx.route.handler, 'GET', '/api/dsh-ace/entries/archive');
+  assert.equal(getArchive.body.entries, undefined, '405 体绝不许是列表 payload（说明被 /entries 分支接走了）');
+  // 反向：列表路由的 GET 仍然 200 且真的返回条目清单（不许因为上面的钉法把 /entries 一起写坏）
+  const getEntries = await callRoute(fx.route.handler, 'GET', '/api/dsh-ace/entries');
+  assert.equal(getEntries.status, 200, 'GET /entries 必须 200，实际 ' + getEntries.status);
+  assert.equal(getEntries.body.ok, true);
+  assert.deepEqual(getEntries.body.entries.map((e) => e.id), ['ace-001'], '列表照常返回活跃条目');
+
+  // 防御纵深的另一半：/entries 的子路径与近邻不许被列表分支吞掉。
+  // 这几发才是「=== 改 startsWith」变异下唯一会红的抓手——归档路由的 GET 405 在变异下
+  // 依旧 405（它排在前面先截住自己），而子路径会被 startsWith 误接走变成 200 列表。
+  for (const sub of ['/api/dsh-ace/entries/unknown-sub', '/api/dsh-ace/entriesX', '/api/dsh-ace/entries/foo/bar']) {
+    const res = await callRoute(fx.route.handler, 'GET', sub);
+    assert.equal(res.status, 404, 'GET ' + sub + ' 必须 404（/entries 是精确匹配，不许吞子路径），实际 ' + res.status);
+    assert.deepEqual(Object.keys(res.body), ['error'], '404 体必须是结构化 { error }，实际 ' + JSON.stringify(res.body));
+  }
+  // 且这两条失败/读操作一个字节都没落盘
+  assert.deepEqual(parsePlaybook(fs.readFileSync(fx.file, 'utf8')).entries.map((e) => e.id), ['ace-001']);
+});
+
 
 test.after(() => {
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }

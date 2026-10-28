@@ -532,6 +532,7 @@ GET /api/dsh-ace/stats
 | 排序与搜索放客户端 | 数据量上限就是 `maxEntries`（默认 100、硬上限 1000），全量一次取回本地过滤 + 排序，比让服务端做 `?q=&sort=&page=` 参数简单得多，也省掉一套服务端分页语义 |
 | 懒加载：第一次切到该页才发请求 | 记录页不是默认页，页面打开时不请求；`handled` ref 记已处理的 `reloadToken`，切走再回来 `active` 变真但 `reloadToken` 没变 → 不重复请求，点「刷新」才重拉 |
 | 归档分区**只读**，没有删除/还原按钮 | 归档条目不参与检索/合并/注入，它们的价值是「历史还在文件里可查」；给它们做删除入口等于把「永不物理删除」这条红线交到一次误点击手上。要清理归档文件只能手工编辑 `archive.md` |
+| 手动归档另开一条**写**路由 `POST /api/dsh-ace/entries/archive`，不塞进 `/entries` 的 POST | `/entries` 的语义是「只读观察者」，往里塞写会让一条观察者端点长出副作用；写路由与 `/settings` 并列、走同一条围栏，语义边界干净。详见下一小节 |
 
 接口形状（只读、不落盘、不缓存，围栏与 `/stats` 一致，只认 GET，其他方法 405）：
 
@@ -558,6 +559,34 @@ GET /api/dsh-ace/entries
 ```
 
 页面侧固定 20 条/页，搜索对 `id`/`title`/`condition`/`action`/`rationale` 五字段做大小写不敏感子串匹配，编号列按数字比较（`ace-2` 在 `ace-10` 之前，不是字典序），更新日期列按毫秒时间戳比较（第 33 轮起 `updated` 是毫秒精度，界面仍只显示到日）。
+
+### 记录列表页：手动归档一条（HTTP 面上唯一的写路由）
+
+**结论：给活跃条目加一个「两段式确认」的手动归档动作；后端只新增一条写路由 `POST /api/dsh-ace/entries/archive`，写入通道整套复用 `commitOps` 的 `remove` 路径。**
+
+| 决定 | 理由 |
+| --- | --- |
+| 归档原因用既有的 `removed-by-request`，不新增第五种 | `ARCHIVE_REASONS` 的四原因（`superseded` / `removed-by-request` / `evicted` / `merged`）是归档文件的格式契约，`lib/entry-format.js` 的 `parseArchiveLine` 与设置页的四条原因文案都按它对齐。手动归档的语义就是「调用方显式移除」，与 `remove` op 的既有原因完全一致，没有新语义可表达 |
+| 写盘只走 `commitOps`，不另开通道 | `commitOps` 的 `remove` 路径已经做全了四件事：锁内重读最新 + 冲突判定、`applyOps` 把归档原因写死成 `removed-by-request`、高水位取「活跃 + 归档两侧」最大值、**先 `appendArchivedEntries` 写 `archive.md` 再 `writeFileAtomic` 写手册**（红线 ②）。自己写一条通道等于把这四条约束抄一遍，抄错任何一条都是物理删除或编号复用 |
+| 路由必须先于 `/entries` 判定吗？不必——但**必须用精确串比较** | `routePath` 是去掉 `/api/dsh-ace` 前缀后的**精确串**（`lib/index.js` 的 `url.pathname.slice(ROUTE_PATH.length)`），`'/entries/archive'` 与 `'/entries'` 是两个不同的值，写成 `startsWith('/entries')` 才会把两个混掉。本分支自带「非 POST → 405」，因此 `GET /entries/archive` 仍然 405，`/entries` 的 GET 语义一字不动 |
+| 失败一律结构化非 2xx，只有真异常才 500 | id 形状非法 → 400；**不在活跃区**（含「已经在归档里」）→ 404；提交期间被并发改动、`applyOps` 没动这一条 → 409；读盘/写盘的意外异常 → 500 但带 `{ error }` 结构体。客户端对这四种一视同仁：把 `error` 渲染成页面上一行 `.ace-entries-note`，绝不静默 |
+| 记账 / 日志 | 成功路径走既有的 `noteArchived`（`archiveStats.archived + 1`、`byReason['removed-by-request'] + 1`），再加一条 `dsh-ace: 手动归档 1 条（…）` 的 info 日志；`runtimeSnapshot()` 的七键协议不变（红线 ⑨：日志数字与 `GET /stats` 的 `runtime` 必须对得上） |
+| 按钮放**详情区**而不是行内 | 整行本身是 `role="button"`（点行 = 展开/收起）。行内塞按钮要么得 `stopPropagation` 抢掉行的点击，要么键盘可达性出错（同一行两个可聚焦语义）。放详情区最干净：按钮是详情区里唯一可聚焦元素，行的键盘语义不受影响 |
+| 两段式确认全在客户端本地，首点零写 | 首点只 `setPendingArchive(id)`；二点才 POST。pending 按 id 存、同一时刻只认一条：点另一条 = 换成那条；切分区 / 刷新 / 点页内别处一律清空。这样「误点一次」在任何情况下都不会落到盘上 |
+| 归档分区仍然只读 | 归档条目只增不减（红线 ⑦）。手动归档只把条目从活跃区搬进 `archive.md`，归档区本身没有任何删除/还原/再归档入口 |
+
+接口形状（写路由，围栏与 `/settings` 一致；只认 POST，其他方法 405）：
+
+```
+POST /api/dsh-ace/entries/archive
+请求体：{ "id": "ace-NNN" }                  // 首尾空白先 trim；非 ace-<数字> → 400
+成功：200 { ok: true, archived: { id, reason: 'removed-by-request', date } }
+失败：400 { error }   // id 形状非法 / 手册路径解析失败（相对路径在 HTTP 面无会话工作目录）
+      404 { error }   // 该 id 不在活跃区（不存在，或已经在归档文件里）
+      409 { error }   // 提交期间被并发改动，applyOps 没动这一条（刷新后重试）
+      500 { error }   // 读盘 / 写盘的意外异常
+```
+
 
 ### 手册文件位置：默认本机共享层
 

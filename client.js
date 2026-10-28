@@ -27,6 +27,9 @@ window.__ModuleLoader__.load({
     // 手册条目清单（宿主 lib/index.js 的 GET /entries，数据源 lib/entries.js）：只读，
     // 记录页懒加载 —— 第一次切到记录页才拉，切走再回来不重复请求。
     const ENTRIES_ROUTE = '/api/dsh-ace/entries';
+    // 手动归档（宿主 lib/index.js 的 POST /entries/archive）：把一条活跃条目搬进 archive.md，
+    // 两段式确认后才发；动作本身是搬移，绝不物理删除。
+    const ENTRIES_ARCHIVE_ROUTE = '/api/dsh-ace/entries/archive';
     const inject = ['slots', 'locale'];
 
     const zh = {
@@ -161,6 +164,9 @@ window.__ModuleLoader__.load({
       entriesArchiveReasonRemoved: '被显式移除',
       entriesArchiveReasonEvicted: '最少使用淘汰',
       entriesArchiveReasonMerged: '合并进另一条',
+      entriesArchiveBtn: '归档',
+      entriesArchiveConfirmBtn: '确认',
+      entriesArchiveFailed: '归档失败：{error}',
       on: '开',
       off: '关',
       saved: '已保存',
@@ -300,6 +306,9 @@ window.__ModuleLoader__.load({
       entriesArchiveReasonRemoved: 'Removed on request',
       entriesArchiveReasonEvicted: 'Evicted as least used',
       entriesArchiveReasonMerged: 'Merged into another entry',
+      entriesArchiveBtn: 'Archive',
+      entriesArchiveConfirmBtn: 'Confirm',
+      entriesArchiveFailed: 'Archive failed: {error}',
       on: 'On',
       off: 'Off',
       saved: 'Saved',
@@ -477,6 +486,15 @@ window.__ModuleLoader__.load({
       '.ace-entries-scope-btn{font-size:11px;color:#9fb2c5;background:#131a22;border:1px solid #263140;border-radius:6px;padding:3px 9px;cursor:pointer;font-family:inherit}',
       '.ace-entries-scope-btn:hover{color:#2dd4bf;border-color:#1d3a38}',
       '.ace-entries-scope-btn.is-active{color:#2dd4bf;border-color:#1d3a38}',
+      // —— 记录页「活跃」分区：手写归档按钮（两段式确认，绝不物理删除）——
+      // 底色/边框沿用同一批 VCP 暗色 token；确认态切红色系（深红底 #3b1418 + 亮红字 #ff8b8b），
+      // 在 #131a22 附近暗底上对比度 ≥ 7:1，够看清也够"危险感"。
+      '.ace-entries-archive{margin:2px 0 4px;display:flex;justify-content:flex-end}',
+      '.ace-entries-archive-btn{font-size:11px;color:#9fb2c5;background:#131a22;border:1px solid #263140;border-radius:6px;padding:3px 9px;cursor:pointer;font-family:inherit}',
+      '.ace-entries-archive-btn:hover{color:#5eead4;border-color:#1d3a38}',
+      '.ace-entries-archive-btn.is-confirm{color:#ff8b8b;background:#3b1418;border-color:#7f1d1d;font-weight:600}',
+      '.ace-entries-archive-btn.is-confirm:hover{color:#ffb3b3;background:#4d1a1f;border-color:#b91c1c}',
+      '.ace-entries-archive-note{color:#ff8b8b}',
     ].join('\n');
 
     /**
@@ -992,6 +1010,15 @@ window.__ModuleLoader__.load({
       // 不用 AbortController —— 这里只需要「丢弃旧响应」而不是真的取消网络，
       // 且 signal 在宿主 fetch 包装/测试假宿主里不一定被支持，代次计数器没有这个依赖。
       const gen = React.useRef(0);
+      // —— 手动归档的两段式确认态（按 id 存，同一时刻只承认一条）——
+      // 首点「归档」只把 id 记进来，本地变红「确认」，**不发任何写请求**；
+      // 二点「确认」才真发 POST /entries/archive。点别处 / 点另一条 / 切分区 / 刷新
+      // 都会把 pending 清空，绝不留下悬空的待确认态。
+      const [pendingArchive, setPendingArchive] = React.useState(null);
+      // 归档失败的页内可见报错（不弹窗、不静默、不吞掉服务端的 error 原文）。
+      const [archiveError, setArchiveError] = React.useState(null);
+      // 在飞闸：确认态连点不许打两发写请求（第二次必然 404，会把页面变成假故障）。
+      const archiveBusy = React.useRef(false);
 
       const load = () => {
         const mine = gen.current + 1;
@@ -1035,7 +1062,12 @@ window.__ModuleLoader__.load({
         load();
       }, [active, reloadToken]);
 
-      const reload = () => setReloadToken((n) => n + 1);
+      // 刷新 = 重新拉列表，同时把两段式确认态与旧报错一起清掉（列表变了，待确认的那条可能已经不在了）。
+      const reload = () => {
+        setPendingArchive(null);
+        setArchiveError(null);
+        setReloadToken((n) => n + 1);
+      };
       const head = h('div', { className: 'ace-entries-head' },
         h('div', { className: 'ace-entries-title' }, t('entriesTitle')),
         h('button', { type: 'button', className: 'ace-entries-btn', onClick: reload }, t('entriesRefresh')));
@@ -1062,11 +1094,50 @@ window.__ModuleLoader__.load({
         type: 'button',
         className: 'ace-entries-scope-btn' + (scope === id ? ' is-active' : ''),
         'aria-pressed': scope === id ? 'true' : 'false',
-        onClick: () => setScope(id),
+        // 切分区也复位确认态：切走之后那条可能已不在视野里，留着悬空确认态会误删。
+        onClick: () => { setScope(id); setPendingArchive(null); },
       }, label);
       const scopeSwitch = h('div', { className: 'ace-entries-scope', role: 'group', 'aria-label': t('entriesTitle') },
         scopeButton('active', t('entriesScopeActive')),
         scopeButton('archived', t('entriesScopeArchived')));
+
+      // 手动归档动作：按当前态分流 —— 该条还没进确认态 → 只置 pending（**零写操作**）；
+      // 已经是确认态 → 真发 POST。点另一条 = 换成那一条（上一条的确认自然作废）。
+      const archiveOne = (id) => {
+        if (pendingArchive !== id) {
+          setPendingArchive(id);
+          setArchiveError(null);
+          return;
+        }
+        if (archiveBusy.current) return;
+        archiveBusy.current = true;
+        setArchiveError(null);
+        let httpStatus = 0;
+        fetch(ENTRIES_ARCHIVE_ROUTE, {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ id }),
+        })
+          .then((response) => {
+            httpStatus = response.status;
+            // 服务端的错误体是 { error }；解析失败也别吞掉状态码。
+            return response.json().catch(() => null);
+          })
+          .then((payload) => {
+            if (payload && payload.ok === true) {
+              setPendingArchive(null);
+              reload();
+              return;
+            }
+            setArchiveError(payload && typeof payload.error === 'string' ? payload.error : 'HTTP ' + (httpStatus || '?'));
+            setPendingArchive(null);
+          })
+          .catch((error) => {
+            setArchiveError(String(error?.message ?? error));
+            setPendingArchive(null);
+          })
+          .then(() => { archiveBusy.current = false; });
+      };
 
       const needle = query.trim().toLowerCase();
       const filtered = all.filter((entry) => entryMatches(entry, needle));
@@ -1202,7 +1273,21 @@ window.__ModuleLoader__.load({
               ? h('div', { className: 'ace-entries-detail' },
                 detailBlock('entriesCondition', entry?.condition, null),
                 detailBlock('entriesAction', entry?.action, null),
-                detailBlock('entriesRationale', entry?.rationale, 'entriesRationaleEmpty'))
+                detailBlock('entriesRationale', entry?.rationale, 'entriesRationaleEmpty'),
+                // 归档按钮放**详情区**而不是行内：整行本身是 role=button（点行 = 展开/收起），
+                // 行内塞按钮要么得 stopPropagation 抢掉行的点击，要么键盘可达性出错；详情区最干净。
+                // 两段式：首点只把这条置成确认态（不发请求），二点才真归档。
+                h('div', { className: 'ace-entries-archive' },
+                  h('button', {
+                    type: 'button',
+                    className: 'ace-entries-archive-btn' + (pendingArchive === id ? ' is-confirm' : ''),
+                    'aria-label': pendingArchive === id ? t('entriesArchiveConfirmBtn') : t('entriesArchiveBtn'),
+                    onClick: (e) => {
+                      // 拦住冒泡：容器上的「点别处复位」监听不能把刚点出来的确认态立刻清掉。
+                      if (typeof e?.stopPropagation === 'function') e.stopPropagation();
+                      archiveOne(id);
+                    },
+                  }, pendingArchive === id ? t('entriesArchiveConfirmBtn') : t('entriesArchiveBtn'))))
               : null);
         }));
 
@@ -1233,9 +1318,18 @@ window.__ModuleLoader__.load({
           onClick: () => setPage(currentPage + 1),
         }, t('entriesNext')));
 
-      return h('div', { className: 'ace-entries' },
+      return h('div', {
+        className: 'ace-entries',
+        // 点别处复位：容器吞掉冒泡上来的点击（行本身、刷新、分区切换都算「别处」），
+        // 只把悬空的确认态清掉；按钮自己的 onClick 已 stopPropagation，不会被这里抢掉。
+        onClick: () => { if (pendingArchive !== null) setPendingArchive(null); },
+      },
         head,
         scopeSwitch,
+        archiveError === null
+          ? null
+          : h('div', { className: 'ace-entries-note ace-entries-archive-note' },
+            fmt(t('entriesArchiveFailed'), { error: archiveError })),
         h('input', {
           className: 'ace-entries-search',
           type: 'text',

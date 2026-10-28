@@ -2,5 +2,8 @@
   "meta": {
     "title": "ACE Playbook",
     "description": "ACE (Agentic Context Engineering): an evolvable playbook distilled from task retrospectives, consulted before tasks; includes a settings page."
-  }
+  },
+  "entriesArchiveBtn": "Archive",
+  "entriesArchiveConfirmBtn": "Confirm",
+  "entriesArchiveFailed": "Archive failed: {error}"
 }

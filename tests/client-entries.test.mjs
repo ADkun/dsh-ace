@@ -132,10 +132,43 @@ async function settle() {
   flush();
 }
 
-async function click(node) {
-  assert.equal(typeof node.props.onClick, 'function', '节点没有 onClick');
-  node.props.onClick({ preventDefault() {}, stopPropagation() {}, target: node });
+async function click(node, options = {}) {
+  // 默认路径保持原样（既有用例全走这条）：只调本节点自己的 onClick，不冒泡。
+  // options.bubbles=true 才沿 parent 链逐级派发，模拟真实浏览器的事件冒泡——
+  // 专门用来测「按钮的 stopPropagation 拦不拦得住行/容器的 onClick」这条通路。
+  if (!options.bubbles) {
+    assert.equal(typeof node.props.onClick, 'function', '节点没有 onClick');
+    node.props.onClick({ preventDefault() {}, stopPropagation() {}, target: node });
+    await settle();
+    return [];
+  }
+  // 真实冒泡：从点击节点沿 parent 链向上，每级共享同一个事件对象（与浏览器一致）；
+  // 某级 handler 里调了 stopPropagation 就停在那一层（浏览器语义：当前 handler 跑完才停）。
+  // 返回**实际执行了 onClick 的节点**，用例可以断言「事件只到按钮、没到行/容器」。
+  const parents = new Map();
+  walk(tree, (n) => {
+    for (const child of n.children || []) {
+      if (child && typeof child === 'object') parents.set(child, n);
+    }
+  });
+  const event = {
+    target: node,
+    defaultPrevented: false,
+    propagationStopped: false,
+    preventDefault() { event.defaultPrevented = true; },
+    stopPropagation() { event.propagationStopped = true; },
+  };
+  const invoked = [];
+  let current = node;
+  while (current && !event.propagationStopped) {
+    if (typeof current.props?.onClick === 'function') {
+      invoked.push(current);
+      current.props.onClick(event);
+    }
+    current = parents.get(current);
+  }
   await settle();
+  return invoked;
 }
 
 // —— 假宿主 ——
@@ -210,6 +243,17 @@ function makeHost(options = {}) {
       if (options.bounds !== undefined) body.bounds = options.bounds;
       return json(200, body);
     }
+    // 手动归档（POST /entries/archive）。options.archive 可以是固定 payload、
+    // { __status, body } 状态体、Error（网络失败）或 (n, init) => response 的函数。
+    if (url === '/api/dsh-ace/entries/archive') {
+      const reply = options.archive === undefined
+        ? { ok: true, archived: { id: 'ace-001', reason: 'removed-by-request', date: '2026-10-27T10:00:00.000+08:00' } }
+        : options.archive;
+      if (typeof reply === 'function') return reply(calls.length, init);
+      if (reply instanceof Error) throw reply;
+      if (reply && reply.__status) return json(reply.__status, reply.body ?? { ok: false });
+      return json(200, reply);
+    }
     throw new Error('意外的请求：' + url);
   };
   return { settings, calls, fetchStub };
@@ -270,7 +314,12 @@ const rows = () => findAll(hasClass('ace-entries-row'));
 const rowTexts = () => rows().map((node) => textOf(node));
 const rowIds = () => findAll(hasClass('ace-entries-row-id')).map((node) => textOf(node));
 const searchInput = () => findAll(hasClass('ace-entries-search'))[0];
-const refreshBtn = () => findAll(hasClass('ace-entries-btn'))[0];
+const refreshBtn = () => pageById('entries') && findAll(hasClass('ace-entries-btn'))[0];
+// 手动归档：写请求的调用清单（成功/失败都记在这里）+ 当前渲染出的归档按钮（按 DOM 顺序）。
+const archiveCalls = (host) => host.calls.filter((call) => call.url === '/api/dsh-ace/entries/archive');
+const archiveBtns = () => findAll(hasClass('ace-entries-archive-btn'));
+const archiveNote = () => findAll(hasClass('ace-entries-archive-note'))[0];
+const renderedCss = () => findAll((node) => node.type === 'style').map((node) => textOf(node)).join('\n');
 const pagerText = () => {
   const node = findAll(hasClass('ace-entries-pager-text'))[0];
   return node ? textOf(node) : '';
@@ -1013,3 +1062,350 @@ test('已归档分区：字典里归档相关键 zh/en 两侧齐全，占位符�
     assert.match(DICTS.en[key], /\{\w+\}/, 'en 的 ' + key + ' 需要占位符');
   }
 });
+
+// —— 手动归档（两段式确认）——
+// 覆盖口径：首点只本地置确认态、**零写请求**；二点才 POST；成功后 reload 且 pending 复位；
+// 失败在页面上留一行可见报错并退回初始态；切分区 / 点别处 / 点另一条都复位；
+// 归档分区（archived scope）仍然只读，绝不出现归档按钮。
+
+/** 按行内的 id span 精确定位并**展开**（已展开则不动，避免点成收起）。 */
+async function openRowById(id) {
+  const row = rowById(id);
+  assert.ok(row, '找不到 ' + id + ' 对应的行');
+  if (row.props['aria-expanded'] === 'true') return;
+  await click(row);
+}
+
+/** 行的父节点就是 .ace-entries-row（迷你 React 的 props.children 里挂着 id span）。 */
+function rowById(id) {
+  return rows().find((node) => (node.children || [])
+    .some((child) => typeof child === 'object' && child && hasClass('ace-entries-row-id')(child) && textOf(child) === id));
+}
+
+test('活跃分区：归档按钮在详情区，首点变红「确认」且不发任何写请求', async () => {
+  const host = makeHost({ entries: entriesPayload([entry()]) });
+  await mount(host);
+  await gotoEntries();
+
+  // 收起时不渲染归档按钮（按钮在详情区）
+  assert.equal(archiveBtns().length, 0, '收起行不渲染归档按钮');
+
+  await openRowById('ace-001');
+  assert.equal(archiveBtns().length, 1, '展开后详情区出现 1 个归档按钮');
+  const btn = archiveBtns()[0];
+  assert.equal(textOf(btn), DICTS.zh.entriesArchiveBtn, '初始文案是「归档」');
+  assert.equal(btn.props.className, 'ace-entries-archive-btn', '初始没有 is-confirm');
+  assert.equal(btn.props['aria-label'], DICTS.zh.entriesArchiveBtn, '初始 aria-label 与文案一致');
+  assert.equal(btn.props.type, 'button', 'type=button（不提交表单）');
+
+  const before = entriesFetches(host).length;
+  await click(archiveBtns()[0]);
+
+  // ① 首点：只本地置 pending，一个写请求都不许发
+  assert.equal(archiveCalls(host).length, 0, '首点绝不许发写请求');
+  assert.equal(entriesFetches(host).length, before, '首点也不刷新列表');
+  const pending = archiveBtns()[0];
+  assert.equal(textOf(pending), DICTS.zh.entriesArchiveConfirmBtn, '首点后文案变「确认」');
+  assert.ok(hasClass('ace-entries-archive-btn')(pending), '仍是同一个按钮类名');
+  assert.ok(hasClass('is-confirm')(pending), '首点后带 is-confirm');
+  assert.equal(pending.props['aria-label'], DICTS.zh.entriesArchiveConfirmBtn, '确认态 aria-label 同步');
+});
+
+test('活跃分区：二点才发 POST /entries/archive，成功后 reload 并清空 pending', async () => {
+  const host = makeHost({ entries: entriesPayload([entry({ id: 'ace-002', title: '要归档的' })]) });
+  await mount(host);
+  await gotoEntries();
+  await openRowById('ace-002');
+
+  await click(archiveBtns()[0]); // 首点：置确认态
+  assert.equal(archiveCalls(host).length, 0);
+
+  const beforeReload = entriesFetches(host).length;
+  await click(archiveBtns()[0]); // 二点：真发 POST
+
+  const calls = archiveCalls(host);
+  assert.equal(calls.length, 1, '二点恰好发一次 POST');
+  assert.equal(calls[0].method, 'POST', '用 POST，不是 GET');
+  assert.deepEqual(calls[0].body, { id: 'ace-002' }, '请求体形状 { id }');
+  assert.equal(entriesFetches(host).length, beforeReload + 1, '成功后 reload() 再拉一次列表');
+  // reload() 会再拉一次列表：等它落定（夹具没变，这条还在列表里）；
+  // 展开态 open[id] 不受 reload 影响，所以详情区和按钮都还在。
+  await settle();
+  await settle();
+  // pending 清空 → 按钮回到初始态
+  const btn = archiveBtns()[0];
+  assert.ok(btn, 'reload 后条目仍在列表里、按钮仍在详情区');
+  assert.equal(textOf(btn), DICTS.zh.entriesArchiveBtn, '成功后按钮退回「归档」');
+  assert.equal(hasClass('is-confirm')(btn), false, '成功后不再带 is-confirm');
+  assert.equal(archiveNote(), undefined, '成功路径不渲染错误行');
+});
+
+test('活跃分区：确认态下连点两下（第二下不等第一发落定），后端只许收到 1 发', async () => {
+  // 守的变异：archiveOne 的在飞闸 `if (archiveBusy.current) return;`（client.js:1112-1113）。
+  // 既有用例的第二点都发生在上一发 settle 之后，busy 早已放行，这道闸从未被压到。
+  // 这里让第一发 fetch 挂着不落定（busy=true 的整个窗口），再对同一个按钮同步连点第二下——
+  // 第二下越过「首点置确认态」闸（pendingArchive 已是本条），必须被在飞闸挡住。
+  let releaseFetch;
+  const gate = new Promise((resolve) => { releaseFetch = resolve; });
+  const host = makeHost({
+    entries: entriesPayload([entry()]),
+    archive: () => gate.then(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, archived: { id: 'ace-001', reason: 'removed-by-request', date: '2026-10-27T10:00:00.000+08:00' } }),
+    })),
+  });
+  await mount(host);
+  await gotoEntries();
+  await openRowById('ace-001');
+  await click(archiveBtns()[0]); // 首点：进确认态，零请求
+  assert.equal(archiveCalls(host).length, 0);
+
+  // 同一个（最新渲染出的）按钮上同步连点两下：两下共用同一个 pendingArchive===ace-001 的闭包。
+  const btn = archiveBtns()[0];
+  const ev = { preventDefault() {}, stopPropagation() {}, target: btn };
+  btn.props.onClick(ev);
+  btn.props.onClick(ev);
+  await settle();
+
+  assert.equal(archiveCalls(host).length, 1,
+    'busy 窗口里的第二下必须被在飞闸挡掉（后端只收 1 发），实际 ' + archiveCalls(host).length);
+
+  releaseFetch();
+  await settle();
+  await settle();
+  assert.equal(archiveCalls(host).length, 1, '第一发放行成功后也不许补发');
+  assert.ok(archiveBtns()[0], '成功 reload 后条目还在，按钮仍在详情区');
+  assert.equal(hasClass('is-confirm')(archiveBtns()[0]), false, '成功后按钮退回「归档」');
+});
+
+test('活跃分区：点归档按钮必须拦住冒泡——不许顺手收起详情、也不许复位确认态', async () => {
+  // 守的变异：按钮 onClick 里的 e.stopPropagation()（client.js:1287）。
+  // 真实浏览器里按钮嵌在展开详情区里，行 div（toggleRow）与容器 div（点别处复位）都在
+  // 点击通路的上游——按钮不拦冒泡，点「确认」会同时触发行的收起与容器的复位。
+  // 夹具默认不冒泡（旧用例的语义不变），这里用 { bubbles:true } 走真实通路。
+  let releaseFetch;
+  const gate = new Promise((resolve) => { releaseFetch = resolve; });
+  const host = makeHost({
+    entries: entriesPayload([entry({ id: 'ace-001' }), entry({ id: 'ace-002', title: '第二条' })]),
+    archive: () => gate.then(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, archived: { id: 'ace-001', reason: 'removed-by-request', date: '2026-10-27T10:00:00.000+08:00' } }),
+    })),
+  });
+  await mount(host);
+  await gotoEntries();
+
+  // 对照组：证明这个冒泡夹具是真的——点 ace-002 行内没有 onClick 的 id span，
+  // 事件一路冒到行（展开）与容器（此时 pendingArchive 为 null，复位是空操作）。
+  const spanB = rowById('ace-002').children.find((c) => hasClass('ace-entries-row-id')(c));
+  const reached = await click(spanB, { bubbles: true });
+  assert.deepEqual(reached.map((n) => n.props.className), ['ace-entries-row', 'ace-entries'],
+    'span 自己没有 onClick：事件应恰好落在行容器与外层容器上');
+  assert.equal(rowById('ace-002').props['aria-expanded'], 'true', '冒泡到了行：行被展开');
+  // 再冒泡点一下把它收起（顺便再证一次冒泡的双向），主场景从「只有 ace-001 展开」开始。
+  const spanB2 = rowById('ace-002').children.find((c) => hasClass('ace-entries-row-id')(c));
+  await click(spanB2, { bubbles: true });
+  assert.equal(rowById('ace-002').props['aria-expanded'], 'false', '第二次冒泡点击把行收起');
+
+  // 主场景：ace-001 展开进确认态（零请求），然后对确认按钮做一次**冒泡**点击。
+  await openRowById('ace-001');
+  await click(archiveBtns()[0]);
+  assert.equal(archiveCalls(host).length, 0, '首点零请求');
+
+  const btn = archiveBtns()[0];
+  const reachedBtn = await click(btn, { bubbles: true });
+  assert.equal(reachedBtn.length, 1,
+    '确认按钮上的冒泡点击必须停在按钮自己（stopPropagation），行与容器都不许收到：实际经过 ' +
+    reachedBtn.map((n) => n.props.className).join(' → '));
+  assert.ok(hasClass('ace-entries-archive-btn')(reachedBtn[0]), '收到事件的必须是那个归档按钮');
+  assert.equal(archiveCalls(host).length, 1, '二段式的第二下：恰好发 1 发 POST');
+  assert.deepEqual(archiveCalls(host)[0].body, { id: 'ace-001' });
+  // 三条「没被冒泡顺手干掉」的证据（fetch 挂着，成功复位还不会来搅局）：
+  assert.equal(rowById('ace-001').props['aria-expanded'], 'true', '行的 toggleRow 没被触发：详情区不收起');
+  assert.ok(hasClass('is-confirm')(archiveBtns()[0]), '容器的复位没被触发：确认态还在');
+  assert.equal(rowById('ace-002').props['aria-expanded'], 'false', '另一行不受影响');
+
+  // 放行成功：按钮退回「归档」，行保持展开（open 不受 reload 影响）
+  releaseFetch();
+  await settle();
+  await settle();
+  assert.equal(hasClass('is-confirm')(archiveBtns()[0]), false, '成功后按钮退回「归档」');
+  assert.equal(rowById('ace-001').props['aria-expanded'], 'true', '成功路径不改变展开态');
+});
+
+test('活跃分区：归档失败在页面上留一行可见报错，并退回初始态', async () => {
+  const host = makeHost({
+    entries: entriesPayload([entry()]),
+    archive: { __status: 404, body: { error: '条目不存在或不在活跃区：ace-001' } },
+  });
+  await mount(host);
+  await gotoEntries();
+  await openRowById('ace-001');
+
+  await click(archiveBtns()[0]);
+  const beforeReload = entriesFetches(host).length;
+  await click(archiveBtns()[0]);
+
+  assert.equal(archiveCalls(host).length, 1);
+  assert.equal(entriesFetches(host).length, beforeReload, '失败不刷新列表（没有可刷的新状态）');
+  const note = archiveNote();
+  assert.ok(note, '失败必须在页面上看得见，不许静默');
+  assert.ok(hasClass('ace-entries-note')(note), '沿用既有 note 类名');
+  const text = textOf(note);
+  assert.ok(text.includes('ace-001'), '报错里带回条目 id：' + text);
+  assert.equal(text, DICTS.zh.entriesArchiveFailed.replace('{error}', '条目不存在或不在活跃区：ace-001'), '按 i18n 模板拼出');
+  assert.equal(textOf(archiveBtns()[0]), DICTS.zh.entriesArchiveBtn, '失败后按钮退回「归档」');
+  assert.equal(hasClass('is-confirm')(archiveBtns()[0]), false, '失败后不再确认态');
+});
+
+test('活跃分区：网络失败（fetch 抛错）同样可见报错，不退化成静默', async () => {
+  const host = makeHost({
+    entries: entriesPayload([entry()]),
+    archive: new Error('网络断了'),
+  });
+  await mount(host);
+  await gotoEntries();
+  await openRowById('ace-001');
+  await click(archiveBtns()[0]);
+  await click(archiveBtns()[0]);
+
+  const text = textOf(archiveNote());
+  assert.ok(text.includes('网络断了'), '异常文案必须出现在页面上：' + text);
+  assert.equal(textOf(archiveBtns()[0]), DICTS.zh.entriesArchiveBtn, '失败后按钮退回初始态');
+});
+
+test('活跃分区：点另一条的归档按钮，前一条的确认态作废（同一时刻只认一条）', async () => {
+  const host = makeHost({ entries: entriesPayload([entry({ id: 'ace-001' }), entry({ id: 'ace-002', title: '第二条' })]) });
+  await mount(host);
+  await gotoEntries();
+  await openRowById('ace-001');
+  await click(archiveBtns()[0]);
+  assert.ok(hasClass('is-confirm')(archiveBtns()[0]), '第一条进入确认态');
+
+  await openRowById('ace-002');
+  // 两条都展开着：第一条仍是确认态，第二条是初始态
+  assert.equal(archiveBtns().length, 2, '两条都展开后有两个归档按钮');
+  const first = archiveBtns()[0];
+  const second = archiveBtns()[1];
+  assert.ok(hasClass('is-confirm')(first), '第一条还在确认态（还没被别处复位）');
+  assert.equal(hasClass('is-confirm')(second), false, '第二条初始态');
+
+  await click(archiveBtns()[1]);
+  assert.equal(archiveCalls(host).length, 0, '点另一条只切换确认态，不发请求');
+  assert.equal(hasClass('is-confirm')(archiveBtns()[0]), false, '前一条的确认态被作废');
+  assert.ok(hasClass('is-confirm')(archiveBtns()[1]), '第二条进入确认态');
+});
+
+test('活跃分区：切分区 / 点别处 / 刷新都把悬空的确认态复位', async () => {
+  const host = makeHost({ entries: entriesPayload([entry()]) });
+  await mount(host);
+  await gotoEntries();
+  await openRowById('ace-001');
+
+  // ① 切到归档分区再切回来
+  await click(archiveBtns()[0]);
+  assert.ok(hasClass('is-confirm')(archiveBtns()[0]));
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  assert.equal(archiveBtns().length, 0, '归档分区不渲染归档按钮（只读）');
+  await click(scopeButton(DICTS.zh.entriesScopeActive));
+  await openRowById('ace-001');
+  assert.equal(hasClass('is-confirm')(archiveBtns()[0]), false, '切回来必须回到初始态');
+
+  // ② 点别处（记录页容器上的 onClick）复位
+  await click(archiveBtns()[0]);
+  assert.ok(hasClass('is-confirm')(archiveBtns()[0]));
+  const container = findAll(hasClass('ace-entries'))[0];
+  container.props.onClick({ preventDefault() {}, stopPropagation() {}, target: container });
+  await settle();
+  assert.equal(hasClass('is-confirm')(archiveBtns()[0]), false, '点别处复位');
+
+  // ③ 刷新（reload）也复位
+  await click(archiveBtns()[0]);
+  assert.ok(hasClass('is-confirm')(archiveBtns()[0]));
+  await click(refreshBtn());
+  assert.equal(hasClass('is-confirm')(archiveBtns()[0]), false, '刷新复位');
+  assert.equal(archiveCalls(host).length, 0, '全程一个写请求都没发');
+});
+
+test('样式表：is-confirm 走红色系且与暗底对比足够，初始态沿用既有暗色 token', async () => {
+  await mount(makeHost());
+  const css = renderedCss();
+  assert.ok(css.includes('.ace-entries-archive-btn{'), '样式表里必须有归档按钮基础规则');
+
+  // 基础态：沿用既有 VCP 暗色 token（#131a22 底 / #9fb2c5 字 / #263140 边）
+  const base = css.split('\n').find((line) => line.startsWith('.ace-entries-archive-btn{'));
+  assert.ok(base, '基础规则存在');
+  assert.match(base, /background:#131a22/, '基础底色沿用暗色 token');
+  assert.match(base, /color:#9fb2c5/, '基础字色沿用既有次要文本 token');
+  assert.match(base, /border:1px solid #263140/, '基础边框沿用既有分隔 token');
+
+  // 确认态：独立一条 .is-confirm 规则，深红底 + 亮红字 + 红边
+  const confirm = css.split('\n').find((line) => line.startsWith('.ace-entries-archive-btn.is-confirm{'));
+  assert.ok(confirm, '必须有一条 .ace-entries-archive-btn.is-confirm{ 规则（不是靠行内 style）');
+  assert.match(confirm, /background:#3b1418/, '确认态底色是深红');
+  assert.match(confirm, /color:#ff8b8b/, '确认态字色是亮红');
+  assert.match(confirm, /border-color:#7f1d1d/, '确认态边框是红');
+  assert.match(confirm, /font-weight:600/, '确认态文字加重，强化二次确认');
+
+  // 悬停态也是红色系（不是既有青绿 hover 串味）
+  const hover = css.split('\n').find((line) => line.startsWith('.ace-entries-archive-btn.is-confirm:hover{'));
+  assert.ok(hover, '确认态 hover 规则存在');
+  assert.match(hover, /background:#4d1a1f/);
+  assert.match(hover, /color:#ffb3b3/);
+
+  // 色值确实是红色系：亮红字 R 通道显著高于 G/B
+  const rgb = (hex) => [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+  for (const hex of ['#ff8b8b', '#ffb3b3', '#3b1418', '#4d1a1f', '#7f1d1d', '#b91c1c']) {
+    const [r, g, b] = rgb(hex);
+    assert.ok(r > g && r > b, hex + ' 必须是红色系（R 通道最大）');
+  }
+  // 对比度：亮红字 vs 深红底，按 WCAG 相对亮度粗算 ≥ 4.5:1
+  const lum = (hex) => {
+    const [r, g, b] = rgb(hex).map((v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a, b) => {
+    const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  assert.ok(ratio('#ff8b8b', '#3b1418') >= 4.5, '确认态文字与底色对比度必须 ≥ 4.5:1，实际 ' + ratio('#ff8b8b', '#3b1418').toFixed(2));
+  assert.ok(ratio('#ff8b8b', '#131a22') >= 4.5, '即便叠在暗底上也 ≥ 4.5:1');
+
+  // 错误行同样是红色系（与既有 .ace-entries-note 的灰蓝区分开）
+  const noteRule = css.split('\n').find((line) => line.startsWith('.ace-entries-archive-note{'));
+  assert.ok(noteRule, '错误行有独立规则');
+  assert.match(noteRule, /color:#ff8b8b/, '错误行用红色系');
+});
+
+test('归档分区：只读 —— 不渲染归档按钮，也没有任何写入口', async () => {
+  const host = makeHost({
+    entries: entriesPayload([entry()], {
+      archived: [archivedEntry({ archive: { reason: 'removed-by-request', date: '2026-10-05' } })],
+      archivedTotal: 1,
+    }),
+  });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  await click(archivedRows()[0]);
+
+  assert.equal(archiveBtns().length, 0, '归档分区绝不渲染归档按钮');
+  const scoped = [];
+  walk(entriesPage(), (node) => scoped.push(node));
+  assert.equal(scoped.filter((node) => hasClass('ace-entries-archive-btn')(node)).length, 0, '归档分区不许出现归档按钮');
+  assert.equal(scoped.filter((node) => hasClass('ace-entries-archive')(node)).length, 0, '连归档按钮的容器都不许有');
+  // 分区切换按钮里有「已归档」，所以只能按**整串相等**判，不能按子串判。
+  for (const node of scoped) {
+    if (node.type !== 'button') continue;
+    const text = textOf(node);
+    assert.equal(text === DICTS.zh.entriesArchiveBtn || text === DICTS.zh.entriesArchiveConfirmBtn,
+      false, '归档分区不许出现「归档 / 确认」按钮：' + text);
+  }
+  assert.equal(archiveCalls(host).length, 0, '浏览归档分区不发任何写请求');
+});
+
