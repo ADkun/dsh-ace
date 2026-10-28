@@ -1,5 +1,9 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import { computeMergeSuggestions, computePairRatios, pairRatioAt, MERGE_THRESHOLD_RATIO } from '../lib/merge.js';
 import { scoreEntries } from '../lib/playbook.js';
 import {
@@ -13,6 +17,65 @@ import {
   survivingEntry,
   planMerges,
 } from '../lib/merge-llm.js';
+// 这条用例要同时钉住「上游把顶层数组包成 candidates」与「下游拿到这个壳仍返回 null」两端，
+// 所以直接拿 prompts.js 的实现做对照（不是复制逻辑）。
+import { extractJsonObject as extractJsonObjectForTest } from '../lib/prompts.js';
+import { flushRawLog, resolveRawLogFile } from '../lib/raw-log.js';
+
+// —— 第 48 轮第二轮 Gap 3：本文件的 DSH_HOME 隔离 ——
+// lib/merge-llm.js 的 parseMergeResult 解析失败时会 dumpRaw 一份现场到 <DSH_HOME>/ace/debug/raw.jsonl
+// （缺口 B2）。本文件里既有的几条用例故意喂垃圾输出，于是它们会往**用户真实日志**里灌夹具：
+// 报告里那 19 行全是这么来的。所以整个文件把 DSH_HOME 指到 os.tmpdir() 下的临时目录，
+// 跑完连目录一起删 —— 测试再也不许碰 ~/.dsh。
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ace-merge-home-'));
+const PREV_HOME = process.env.DSH_HOME;
+const PREV_FLAG = process.env.ACE_RAW_LOG;
+process.env.DSH_HOME = TEST_HOME;
+delete process.env.ACE_RAW_LOG;
+/** 真实 home 的失败现场文件（用户自己的），本文件一个字节都不许往里写。 */
+const REAL_RAW_LOG = path.join(os.homedir(), '.dsh', 'ace', 'debug', 'raw.jsonl');
+/** 读一个 raw.jsonl 的有效行数；文件不存在算 0 行。 */
+function countRawLines(file) {
+  try {
+    return fs.readFileSync(file, 'utf8').split('\n').filter((line) => line.trim() !== '').length;
+  } catch {
+    return 0;
+  }
+}
+/**
+ * 给一个 raw.jsonl 拍一张「指纹」：行数 + 字节数 + 全文件摘要 + 末行原文。
+ *
+ * 为什么不止比行数（第 48 轮第三轮 S5）：只比行数时，某条路径若把真实文件「整行改写」而不是
+ * 「追加一行」，行数照样不变、守护照样绿，用户的现场已经被换掉了却报平安。四件一起比才守得住。
+ */
+function fingerprintRawLog(file) {
+  try {
+    const buf = fs.readFileSync(file);
+    const text = buf.toString('utf8');
+    const lines = text.split('\n').filter((line) => line.trim() !== '');
+    return {
+      exists: true,
+      lines: lines.length,
+      bytes: buf.length,
+      digest: crypto.createHash('sha256').update(buf).digest('hex'),
+      lastLine: lines.length > 0 ? lines[lines.length - 1] : '',
+    };
+  } catch {
+    return { exists: false, lines: 0, bytes: 0, digest: '', lastLine: '' };
+  }
+}
+// 模块加载时先给真实文件拍一张指纹：本文件跑完再比一次（见末尾的守护用例）。
+const REAL_RAW_LOG_BASELINE = countRawLines(REAL_RAW_LOG);
+const REAL_RAW_LOG_FINGERPRINT = fingerprintRawLog(REAL_RAW_LOG);
+
+after(async () => {
+  await flushRawLog();
+  if (PREV_HOME === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = PREV_HOME;
+  if (PREV_FLAG === undefined) delete process.env.ACE_RAW_LOG;
+  else process.env.ACE_RAW_LOG = PREV_FLAG;
+  fs.rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 function makeEntry(id, title, condition, action) {
   return { id, title, condition, action, rationale: '', meta: { created: '', updated: '', hits: 0, lastHit: '' }, extraLines: [] };
@@ -140,6 +203,23 @@ test('parseMergeResult：必须过 extractJsonObject；四字段缺一个 / 空�
   assert.equal(parseMergeResult(JSON.stringify({ ...good, action: '' })), null, '空字符串 → 不合格');
   assert.equal(parseMergeResult(JSON.stringify({ ...good, title: 42 })), null, '类型不对 → 不合格');
   assert.equal(parseMergeResult(''), null, '空输出 → 不合格');
+});
+
+// ── 第 48 轮健壮性缺口「洞 1」的合并侧回归 ──
+// extractJsonObject 现在会把「顶层数组」包成 { candidates: [...] }。
+// 合并要的是 obj.pairs，这个新形状必须走进 parseMergeResult 既有的「形状不合格 → 返回 null」
+// 分支：仍然是 null、绝不抛错 —— 合并的失败语义（红线 12：某对失败只跳过这一对）不许被改动波及。
+test('R48 parseMergeResult｜顶层数组被 extractJsonObject 包成 {candidates} 后仍是 null，绝不抛错', () => {
+  const arr = [
+    { title: 'T1', condition: 'C1', action: 'A1', rationale: 'R1' },
+    { title: 'T2', condition: 'C2', action: 'A2', rationale: 'R2' },
+  ];
+  // 先确认上游确实把它包了壳（否则这条用例就成了空转）。
+  assert.deepEqual(extractJsonObjectForTest(JSON.stringify(arr)), { candidates: arr }, '上游形状变了要看得见');
+  assert.equal(parseMergeResult(JSON.stringify(arr)), null, '顶层数组 → 没有 pairs → null（不抛错）');
+  assert.equal(parseMergeResult('合并结果：' + JSON.stringify(arr)), null, '夹在文字里的顶层数组也走同一条 → null');
+  assert.equal(parseMergeResult(JSON.stringify({ candidates: arr })), null, '即便模型自己写了 candidates 外壳，没有 pairs 也是 null');
+  assert.equal(parseMergeResult('[]'), null, '空数组同样 → null');
 });
 
 test('survivingEntry：保留 created 更早的那条（同 created 按 id 数字升序）', () => {
@@ -355,4 +435,62 @@ test('R45｜planMerges 无预算（deps.budget 缺失）时 ask 不带 maxMs —
   });
   assert.equal(opts.length, 1);
   assert.equal(opts[0].maxMs, undefined, '无预算 → 不派 maxMs（单次上限照旧兜底）');
+});
+
+// ── 第 48 轮第二轮 Gap 3 / Gap 4：失败现场落在临时 home、且 merge 行带 provider/model ──
+
+test('R48-Gap3｜本文件的失败现场只落在临时 DSH_HOME：真实 ~/.dsh 的 raw.jsonl 一行都不许多', () => {
+  // 文件顶部已把 DSH_HOME 指到临时目录；这里守两件事：落点跟着走、真实文件没被碰过。
+  assert.equal(resolveRawLogFile(), path.join(TEST_HOME, 'ace', 'debug', 'raw.jsonl'), '落点必须由临时 DSH_HOME 派生');
+  // S5：行数、字节数、全文件摘要、末行原文四件一起比 —— 追加一行会被行数抓到，整行改写会被
+  // 摘要与末行原文抓到，删掉再补同数量行会被字节数与摘要抓到。
+  const now = fingerprintRawLog(REAL_RAW_LOG);
+  assert.equal(now.exists, REAL_RAW_LOG_FINGERPRINT.exists,
+    '真实日志的存在性不许变（开始时 ' + (REAL_RAW_LOG_FINGERPRINT.exists ? '存在' : '不存在') + '）');
+  assert.equal(now.lines, REAL_RAW_LOG_FINGERPRINT.lines,
+    '测试不许往用户真实日志里写夹具（行数：' + REAL_RAW_LOG_FINGERPRINT.lines + ' → ' + now.lines + '）');
+  assert.equal(now.bytes, REAL_RAW_LOG_FINGERPRINT.bytes,
+    '字节数也不许变（整行改写而非追加会在这里露馅）：' + REAL_RAW_LOG_FINGERPRINT.bytes + ' → ' + now.bytes);
+  assert.equal(now.digest, REAL_RAW_LOG_FINGERPRINT.digest,
+    '全文件摘要必须逐字节一致（同数量替换行也会被抓到）');
+  assert.equal(now.lastLine, REAL_RAW_LOG_FINGERPRINT.lastLine,
+    '末行原文必须一致：改动前 ' + JSON.stringify(REAL_RAW_LOG_FINGERPRINT.lastLine.slice(0, 80))
+      + '，改动后 ' + JSON.stringify(now.lastLine.slice(0, 80)));
+  assert.equal(REAL_RAW_LOG_BASELINE, REAL_RAW_LOG_FINGERPRINT.lines, '两个基线口径必须自洽（行数）');
+});
+
+test('R48-Gap4｜planMerges 透传的 provider/model 真的进了 merge 失败现场（不是空壳行）', async () => {
+  const a = makeEntry('ace-001', '批量改名前先列调用点', '当批量重命名符号时', '先用 grep 列出全部调用点');
+  const b = makeEntry('ace-002', '批量重命名要核对调用点', '当批量重命名符号时', '先用 grep 列出全部调用点');
+  const file = resolveRawLogFile();
+  const before = countRawLines(file);
+  await planMerges([a, b], {
+    ask: async () => '我认为可以合并',
+    provider: 'magpie',
+    model: 'group/never-stuck',
+  });
+  await flushRawLog();
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.trim() !== '');
+  assert.ok(lines.length >= before + 1, '解析失败必须留一行现场：' + (lines.length - before));
+  const last = JSON.parse(lines[lines.length - 1]);
+  assert.equal(last.stage, 'merge');
+  assert.equal(last.provider, 'magpie', '缺 provider 的现场等于半份现场：' + JSON.stringify(last));
+  assert.equal(last.model, 'group/never-stuck', '带上 model：' + JSON.stringify(last));
+  assert.equal(last.raw, '我认为可以合并');
+  assert.ok(typeof last.error === 'string' && last.error.startsWith('ace: LLM 输出中未找到 JSON 对象'), '现场要带错误原文：' + last.error);
+});
+
+// ── 第 48 轮第五轮 F2：数组降级回收不许破坏合并路径的「形状不合格 → null，绝不抛错」不变量 ──
+
+test('R48-F2 回归｜配平但非法 JSON 的数组送 parseMergeResult 仍是 null、绝不抛错', () => {
+  // 尾逗号 / 全角逗号这两类现在会被 extractJsonObject 回收成 { candidates: [...] }。
+  // parseMergeResult 要的是 obj.pairs，拿不到就按既有分支返回 null —— 这条不变量一条都不许退。
+  for (const raw of ['[{"title":"a"},{"title":"b"},]', '[{"title":"a"}，{"title":"b"}]']) {
+    let out;
+    assert.doesNotThrow(() => { out = parseMergeResult(raw); }, '合并路径不许因数组回收而抛错：' + raw);
+    assert.equal(out, null, '形状不合格（无 pairs）必须返回 null：' + raw);
+  }
+  // 反向确认回收真的发生了 —— 否则上面两条就退化成永真断言（永远走「没找到 JSON」）。
+  const recovered = extractJsonObjectForTest('[{"title":"a"},{"title":"b"},]');
+  assert.deepEqual(recovered.candidates.map((c) => c.title), ['a', 'b'], '回收必须真拿到两条（断言不许是永真）');
 });

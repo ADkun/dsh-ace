@@ -1254,6 +1254,99 @@ test('手动归档｜路由顺序是防御纵深：GET /entries/archive 恒 405�
 });
 
 
+// ── 第 48 轮第五轮 F3 / F4：reflect 失败现场的两条接线（手动工具 / 自动复盘）都要真落盘 ──
+//
+// F4 的价值就是「删掉 lib/index.js:1393 那行 dumpRaw，全量还是绿的」—— 所以这条用例必须真打一次
+// /ace 命令、让 reflectRound 真的因为「正文为空」失败，再从临时 DSH_HOME 的 raw.jsonl 里把那一行
+// 读回来。F3 同理，只是入口换成 ace_reflect 手动工具。
+
+/** 读一份 raw.jsonl：不存在/读不出就当作空。 */
+function rawLinesOf(file) {
+  try {
+    return fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.trim() !== '');
+  } catch {
+    return [];
+  }
+}
+
+/** 文件指纹（存在性 / 行数 / 字节数 / 末行原文）：真实 home 的守护要比这四项，只比行数会被整行改写骗过。 */
+function fileSnap(file) {
+  try {
+    const buf = fs.readFileSync(file);
+    const lines = buf.toString('utf8').split('\n').filter((l) => l.trim() !== '');
+    return { exists: true, lines: lines.length, bytes: buf.length, lastLine: lines.length ? lines[lines.length - 1] : '' };
+  } catch {
+    return { exists: false, lines: 0, bytes: 0, lastLine: '' };
+  }
+}
+
+test('R48-F4｜自动复盘 reflect 失败时真的写一条 stage=reflect 现场（带 round/provider/model）', async () => {
+  const REAL_RAW = path.join(os.homedir(), '.dsh', 'ace', 'debug', 'raw.jsonl');
+  const realBefore = fileSnap(REAL_RAW);
+  const rawFile = path.join(HOME_DIR, 'ace', 'debug', 'raw.jsonl');
+  const before = rawLinesOf(rawFile).length;
+
+  // 把 LLM 桩换成「只走 reasoning 通道、正文为空」—— 这正是线上那次失败的真实形态。
+  const prevStream = state.ctx.llm.stream;
+  state.ctx.llm.stream = async function* () {
+    // 正文给一段纯散文（不是空正文 —— 空正文在 oneShot 里就抛了、根本到不了 extractJsonObject），
+    // 这才是「解析失败」这条路径，也是 dumpRaw 唯一该被调用的地方。
+    yield { type: 'text-delta', index: 0, text: '我觉得这条经验很有价值，但我不打算按 JSON 输出' };
+  };
+  let result;
+  try {
+    const command = state.record.commands.find((c) => c.name === 'ace');
+    result = await command.handler({ agent: state.agent, rawInput: '' });
+  } finally {
+    state.ctx.llm.stream = prevStream;
+  }
+
+  assert.equal(result.kind, 'error', '解析失败 → 复盘必须失败（不许当成收敛假成功）：' + JSON.stringify(result));
+  const mine = rawLinesOf(rawFile).slice(before)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((r) => r && r.stage === 'reflect');
+  assert.ok(mine.length >= 1, 'F4：reflectRound 失败必须留一条现场，实际新增 ' + mine.length + ' 条');
+  const rec = mine[mine.length - 1];
+  assert.equal(rec.stage, 'reflect');
+  assert.equal(rec.provider, 'stub-provider', '现场要带 provider：' + JSON.stringify(rec));
+  assert.equal(rec.model, 'stub-model', '现场要带 model：' + JSON.stringify(rec));
+  assert.equal(typeof rec.round, 'number', '现场要带轮次：' + JSON.stringify(rec));
+  assert.ok(typeof rec.error === 'string' && rec.error.includes('未找到 JSON 对象'), '现场要带错误原文：' + rec.error);
+  assert.ok(rec.rawLength > 0, '散文正文 ⇒ rawLength 大于 0（现场与故障一致）：' + rec.rawLength);
+
+  assert.deepEqual(fileSnap(REAL_RAW), realBefore, '真实 ~/.dsh 的 raw.jsonl 一行都不许多（DSH_HOME 必须被隔离）');
+});
+
+test('R48-F3｜ace_reflect 手动工具解析失败也留现场（与自动复盘对齐，错误语义不变）', async () => {
+  const rawFile = path.join(HOME_DIR, 'ace', 'debug', 'raw.jsonl');
+  const before = rawLinesOf(rawFile).length;
+
+  const prevStream = state.ctx.llm.stream;
+  state.ctx.llm.stream = async function* () {
+    yield { type: 'text-delta', index: 0, text: '这次我也不给 JSON，直接说人话' };
+  };
+  const tool = state.record.tools.find((t) => t.name === 'ace_reflect');
+  let err;
+  try {
+    await tool.execute({ summary: 'F3 用例：手动复盘必须留现场' }, { agent: state.agent });
+  } catch (e) {
+    err = e;
+  } finally {
+    state.ctx.llm.stream = prevStream;
+  }
+
+  assert.ok(err instanceof Error, '工具层必须把原生错误原样抛回（不许吞成成功）：' + err);
+  assert.ok(err.message.startsWith('ace: LLM 输出中未找到 JSON 对象'), '错误文案仍来自 extractJsonObject（原样抛回）：' + (err && err.message));
+
+  const mine = rawLinesOf(rawFile).slice(before)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((r) => r && r.stage === 'reflect');
+  assert.ok(mine.length >= 1, 'F3：ace_reflect 解析失败必须留一条 reflect 现场，实际 ' + mine.length + ' 条');
+  const rec = mine[mine.length - 1];
+  assert.equal(rec.provider, 'stub-provider', '手动路径的现场也要带 provider：' + JSON.stringify(rec));
+  assert.equal(rec.model, 'stub-model', '手动路径的现场也要带 model：' + JSON.stringify(rec));
+});
+
 test.after(() => {
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
 });

@@ -6,9 +6,11 @@
 // **真实临时手册 + 真实 commitOps/commitCapacity + 假 Reflector / 假合并 LLM（不调真 LLM）**
 // 真跑整链，钉住第 33 轮之后的四条结构：容量治理先合并再淘汰（c）、合并失败绝不阻塞落盘（d）、
 // 命中计数只在回合边界落盘（D4 / P1-6）、0 候选回合照样做容量治理（P0-6）。
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { parsePlaybook, serializePlaybook, digestEntries, markHits } from '../lib/playbook.js';
@@ -16,6 +18,70 @@ import { dayString } from '../lib/archive.js';
 import { createUsageLedger } from '../lib/ledger.js';
 import { runRecapPipeline, acceptCandidates } from '../lib/recap-pipeline.js';
 import { readArchiveSnapshot } from '../lib/archive-file.js';
+import { flushRawLog, resolveRawLogFile } from '../lib/raw-log.js';
+
+// —— 第 48 轮第二轮 Gap 3：本文件的 DSH_HOME 隔离 ——
+// 有用例故意喂「我认为这两条可以合并（不是 JSON）」这种垃圾合并输出，它会让 lib/merge-llm.js 的
+// parseMergeResult 把现场 dumpRaw 到 <DSH_HOME>/ace/debug/raw.jsonl（缺口 B2）。不隔离的话，
+// 跑一次测试就往用户真实日志里灌一条夹具。这里整个文件把 DSH_HOME 指到 os.tmpdir() 临时目录，
+// 模块跑完连同目录一起删。
+const TEST_HOME = fsSync.mkdtempSync(path.join(os.tmpdir(), 'dsh-ace-recappipeline-home-'));
+const PREV_HOME = process.env.DSH_HOME;
+const PREV_FLAG = process.env.ACE_RAW_LOG;
+process.env.DSH_HOME = TEST_HOME;
+delete process.env.ACE_RAW_LOG;
+/** 真实 home 的失败现场文件（用户自己的），本文件一个字节都不许往里写。 */
+const REAL_RAW_LOG = path.join(os.homedir(), '.dsh', 'ace', 'debug', 'raw.jsonl');
+/** 读一个 raw.jsonl 的有效行数；文件不存在算 0 行。 */
+function countRawLines(file) {
+  try {
+    return fsSync.readFileSync(file, 'utf8').split('\n').filter((line) => line.trim() !== '').length;
+  } catch {
+    return 0;
+  }
+}
+const REAL_RAW_LOG_BASELINE = countRawLines(REAL_RAW_LOG);
+/**
+ * 给一个 raw.jsonl 拍一张「指纹」：行数 + 字节数 + 全文件摘要 + 末行原文。
+ *
+ * 为什么不止比行数（第 48 轮第三轮 S5）：只比行数时，某条路径若把真实文件「整行改写」而不是
+ * 「追加一行」，行数照样不变、守护照样绿，用户的现场已经被换掉了却报平安。四件一起比才守得住。
+ */
+function fingerprintRawLog(file) {
+  try {
+    const buf = fsSync.readFileSync(file);
+    const lines = buf.toString('utf8').split('\n').filter((line) => line.trim() !== '');
+    return {
+      exists: true,
+      lines: lines.length,
+      bytes: buf.length,
+      digest: crypto.createHash('sha256').update(buf).digest('hex'),
+      lastLine: lines.length > 0 ? lines[lines.length - 1] : '',
+    };
+  } catch {
+    return { exists: false, lines: 0, bytes: 0, digest: '', lastLine: '' };
+  }
+}
+const REAL_RAW_LOG_FINGERPRINT = fingerprintRawLog(REAL_RAW_LOG);
+/** 把一个 raw.jsonl 逐行解析成对象数组；坏行丢掉（日志坏行不该让测试炸）。 */
+function readRawRecords(file) {
+  try {
+    return fsSync.readFileSync(file, 'utf8').split('\n').filter((line) => line.trim() !== '')
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .filter((r) => r !== null);
+  } catch {
+    return [];
+  }
+}
+
+after(async () => {
+  await flushRawLog();
+  if (PREV_HOME === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = PREV_HOME;
+  if (PREV_FLAG === undefined) delete process.env.ACE_RAW_LOG;
+  else process.env.ACE_RAW_LOG = PREV_FLAG;
+  fsSync.rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 const TODAY = dayString();
 /** 毫秒时间戳（本地时区）：字典序即时间序。 */
@@ -94,6 +160,8 @@ function makeDeps(file, options = {}) {
     reflectRound: options.reflectRound || (async () => []),
   };
   if (options.mergeAsk) deps.mergeAsk = options.mergeAsk;
+  // 第 48 轮第二轮 Gap 4：合并失败现场要记 provider/model，路由由 index.js 注入到这里。
+  if (options.mergeRoute) deps.mergeRoute = options.mergeRoute;
   return { deps, ledger, agent, recapStats, seen };
 }
 
@@ -271,6 +339,83 @@ test('d｜合并输出不合格（不是合法 JSON / 四字段不全）：视�
   assert.equal(all.find((e) => e.id === 'ace-001').title, SIMILAR_A.title, '失败的那一对正文一个字都不许被改');
   assert.equal(all.find((e) => e.id === 'ace-002').title, SIMILAR_B.title, '失败的那一对正文一个字都不许被改');
   await cleanup(dir);
+});
+
+// ── 第 48 轮第二轮 Gap 4：合并失败现场的收尾确定性 + 路由 ——
+//
+// parseMergeResult 是同步契约，它挂的是 fire-and-forget 的 dumpRaw（同步调用点不必为日志改成 async）。
+// 那时的风险是：整链跑完、进程收尾，那一行可能还没落盘 —— 最需要现场的时候恰恰丢在现场。
+// 所以 tryMerge 在 finally 里 await 一次 flushRawLog()（lib/recap-pipeline.js:176-180）。
+// 这两条用例真跑整链，然后在**流水线自己 return 之后**（不额外等）读文件：
+// 读到就证明收尾确实等过了；顺带钉住 provider/model 已经透传下来。
+
+test('R48-Gap4｜合并失败现场在整链 return 时就已落盘，且带 provider/model（不靠额外 flush）', async () => {
+  const dir = await makeDir('merge-raw-log');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [SIMILAR_A, { ...SIMILAR_B, id: 'ace-002' }]);
+  const { deps } = makeDeps(file, {
+    maxEntries: 2,
+    reflectRound: async () => [C('迁移前先在影子库试跑', '先把迁移脚本在影子库跑一遍再上生产')],
+    mergeAsk: async () => '我认为这两条可以合并（不是 JSON）',
+    mergeRoute: () => ({ provider: 'magpie', model: 'group/never-stuck' }),
+  });
+  const rawFile = resolveRawLogFile();
+  assert.equal(rawFile, path.join(TEST_HOME, 'ace', 'debug', 'raw.jsonl'), '落点必须跟着临时 DSH_HOME 走');
+  const before = countRawLines(rawFile);
+
+  const out = await runRecapPipeline(deps, { agent: { name: 'a' }, summary: '轨迹' });
+  assert.equal(out.merged, 0, '输出不合格 → 一对都没合并成（原有语义不变）');
+  assert.equal(out.added.length, 1, '落盘照常成功（红线 12：失败绝不阻塞落盘）');
+
+  // 关键：这里**没有**再 await flushRawLog()，直接读 —— 流水线返回时现场就该已经在盘上。
+  const lines = readRawRecords(rawFile);
+  const mine = lines.slice(before).filter((r) => r.stage === 'merge' && r.raw === '我认为这两条可以合并（不是 JSON）');
+  assert.equal(mine.length, 1, '整链 return 时该有一行 merge 现场（收尾的 flushRawLog 起了作用）：新增 '
+    + (lines.length - before) + ' 行');
+  assert.equal(mine[0].provider, 'magpie', 'provider 必须透传进现场：' + JSON.stringify(mine[0]));
+  assert.equal(mine[0].model, 'group/never-stuck', 'model 必须透传进现场：' + JSON.stringify(mine[0]));
+  assert.ok(mine[0].error.startsWith('ace: LLM 输出中未找到 JSON 对象'), '现场要带错误原文：' + mine[0].error);
+  await cleanup(dir);
+});
+
+test('R48-Gap4｜没有 mergeRoute 时照旧合并（路由只影响现场、绝不影响判定），现场缺 provider 也不算故障', async () => {
+  const dir = await makeDir('merge-raw-log-noroute');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [SIMILAR_A, { ...SIMILAR_B, id: 'ace-002' }]);
+  const { deps } = makeDeps(file, {
+    maxEntries: 2,
+    reflectRound: async () => [C('迁移前先在影子库试跑', '先把迁移脚本在影子库跑一遍再上生产')],
+    mergeAsk: async () => '我认为这两条可以合并（不是 JSON）',
+  });
+  const out = await runRecapPipeline(deps, { agent: { name: 'a' }, summary: '轨迹' });
+  assert.equal(out.merged, 0, '没有路由时合并失败语义与原来完全相同');
+  assert.equal(out.added.length, 1, '落盘照常成功');
+  const lines = await fs.readFile(resolveRawLogFile(), 'utf8')
+    .then((t) => t.split('\n').filter((l) => l.trim() !== ''), () => []);
+  const last = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((r) => r && r.stage === 'merge' && r.raw === '我认为这两条可以合并（不是 JSON）').pop();
+  assert.ok(last, '现场照记');
+  assert.equal('provider' in last, false, '取不到路由就不写空壳字段（不是写成空串）');
+  await cleanup(dir);
+});
+
+test('R48-Gap3｜本文件的失败现场只落临时 DSH_HOME，真实 ~/.dsh/ace/debug/raw.jsonl 一行不多', () => {
+  assert.equal(resolveRawLogFile(), path.join(TEST_HOME, 'ace', 'debug', 'raw.jsonl'), '落点必须由临时 DSH_HOME 派生');
+  // S5：行数、字节数、全文件摘要、末行原文四件一起比 —— 追加一行会被行数抓到，整行改写会被
+  // 摘要与末行原文抓到，删掉再补同数量行会被字节数与摘要抓到。
+  const now = fingerprintRawLog(REAL_RAW_LOG);
+  assert.equal(now.exists, REAL_RAW_LOG_FINGERPRINT.exists,
+    '真实日志的存在性不许变（开始时 ' + (REAL_RAW_LOG_FINGERPRINT.exists ? '存在' : '不存在') + '）');
+  assert.equal(now.lines, REAL_RAW_LOG_FINGERPRINT.lines,
+    '不许往用户真实日志里灌夹具（行数：' + REAL_RAW_LOG_FINGERPRINT.lines + ' → ' + now.lines + '）');
+  assert.equal(now.bytes, REAL_RAW_LOG_FINGERPRINT.bytes,
+    '字节数也不许变（整行改写而非追加会在这里露馅）：' + REAL_RAW_LOG_FINGERPRINT.bytes + ' → ' + now.bytes);
+  assert.equal(now.digest, REAL_RAW_LOG_FINGERPRINT.digest,
+    '全文件摘要必须逐字节一致（同数量替换行也会被抓到）');
+  assert.equal(now.lastLine, REAL_RAW_LOG_FINGERPRINT.lastLine,
+    '末行原文必须一致：改动前 ' + JSON.stringify(REAL_RAW_LOG_FINGERPRINT.lastLine.slice(0, 80))
+      + '，改动后 ' + JSON.stringify(now.lastLine.slice(0, 80)));
+  assert.equal(REAL_RAW_LOG_BASELINE, REAL_RAW_LOG_FINGERPRINT.lines, '两个基线口径必须自洽（行数）');
 });
 
 test('d｜合并不成功也必须腾位：满额不再整批拒绝，按淘汰顺序写进 archive.md', async () => {

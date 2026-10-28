@@ -423,6 +423,22 @@ summary: '自动复盘：本回合有 ' + pending.mutCount + ' 次 mutating 工�
 
 聚合与归一化在 `lib/stats.js` 的 `normalizeRuntime`——恒返回 **7 个键**（`injectedBatches` / `injectedAppended` / `retrievalHits` / `evicted` / `merged` / `archived` / `archivedByReason`）、缺字段补 0，所以空态与成功态的字段集合完全一致（客户端不必判 undefined）。缺字段补 0 的代价是「老宿主上显示一排 0」，所以客户端对「整个 `runtime` 不存在」的情况单独显示一行灰字（见「设置页顶部的只读统计」）。改前的 `recaps` / `candidates` / `written` / `helpful` / `harmful` / `unobserved` / `gateRejected` / `injectedProbation` 全部删除，**不许两套口径并存**（tests/wiring.test.mjs 的字段断言钉住）。
 
+### 失败现场调试日志（第 48 轮）
+
+**结论：复盘/合并的 LLM 输出解析失败时，把原始输出落一份盘到 `<DSH_HOME>/ace/debug/raw.jsonl`；它只服务诊断，永不参与判定、永不改调用方的错误语义。** 起因是线上那次「LLM 输出中未找到 JSON 对象」——事后拿到的只有一句话通知，模型吐了什么、多少字、空串还是散文全无记录，只能靠源码考古去推断（`lib/raw-log.js` 顶部注释记着这条动机）。
+
+**落点跟手册同一层（`<DSH_HOME>/ace`）、保留最近 20 条**：`resolveRawLogFile` 不写死绝对路径，`DSH_HOME` 缺省回落 `~/.dsh`，与 `playbook.md` / `archive.md` 同一个 home，用户的「ACE 相关文件都在这一个目录下」这条心智不破。**保留 20 条**是因为这里存的是**每一次失败**，不封顶就是无限增长；超了只留最近 20 条、把最旧的挤掉——挤掉的必然是最老的那批历史夹具，而最近的现场才有诊断价值（写盘走串行链 `writeChain`，读旧行 → 追加 → 截尾 → 整文件重写，不搞索引、不追加半行）。
+
+**`raw` 正文截 4000 字，但 `rawLength` 记全长**：4000 字足够看出「空串 / 散文 / 半截 JSON」这三类现场，又不至于一篇长文把文件撑爆；`rawLength` 单独记 `raw.length`，是为了在正文被截断时仍能判断「模型到底吐了 8 千字还是 40 字」——截断会骗人，全长不会。选填字段（`round` / `provider` / `model`）没有就不写空壳，让每一行都是真话。
+
+**`dumpRaw` 任何情况下都不 reject**：目录建不出、写不进、JSON 序列化炸，全部内部 catch，返回 false。日志是为了排查复盘，**绝不能反过来把一次复盘失败变成更坏的失败**——这是本仓库既有的失败安全口径（同 `lib/inject-delivery.js` 的 pre-step 只 warn）。`ACE_RAW_LOG=0|off` 时完全不写、连目录都不建：线上不想要这份文件的人一个字节都不该被创建。只 import `node:fs` / `node:os` / `node:path`，零宿主包、也不 import 插件其它 lib（避免与 `lib/index.js`、`lib/merge-llm.js` 形成循环依赖）。调用点都在 `withExclusiveLock` 之外，本模块自己也绝不加锁——它不碰手册。
+
+**merge 侧用 `void dumpRaw(...)`、复盘管道在 `finally` 里 `await flushRawLog()`**：`parseMergeResult` 是**同步导出契约**（`planMerges` 与测试都按同步返回值用，不许为了记日志把它改成 async），`lib/merge-llm.js` 的 catch 里只能 fire-and-forget，写完不写完都不影响「失败就换下一对」，因此用 `void`（`dumpRaw` 保证不 reject，所以也不会变成未处理的 promise 拒绝）；而 `lib/recap-pipeline.js` 的 `tryMerge` 在 `finally` 里等一次 `flushRawLog()`，只为了让**整链 `return` 时现场已经在盘上**（测试靠它拿到确定性，生产不依赖）。两条路径的失败语义都没动：合并仍返回 `null`，复盘仍照原样上抛。
+
+**自动复盘与手动 `/ace` 两条路径都要接**：`lib/index.js` 里 reflect 失败（带 `round`/`provider`/`model`）与手动 `ace_reflect` 工具失败各 `await dumpRaw` 一次。少接任何一条，手动路径报错时就只有零字节痕迹——同一次解析失败，两条入口的诊断能力必须对齐。（`tests/wiring.test.mjs` 的 F3/F4 两条都用「删掉那行 `dumpRaw` 就转红」各自自证过。）
+
+**三条已知取舍**：① **跨进程并发未加固**——串行链只保证同进程内两次写不互相覆盖，两个进程同时失败仍可能丢一行（本项目本就单进程，这条只是保险）；② **进程被强杀可能丢最后几条**——fire-and-forget 的写入在进程消失时不保证落盘，生产路径靠 `flushRawLog` 收尾也只是尽力而为；③ **保留 20 条会挤掉旧夹具**——真实 `~/.dsh/ace/debug/raw.jsonl` 里现存的历史夹具会被新现场挤出去，这是「不无限增长」的必然代价，本轮不为此加保留策略。①②只能线上观察，③已在 FIX-REPORT-R48.md 的「遗留与未验证」里登记。
+
 ## 对外接口
 
 **结论：模型可见三个工具，人可见一个配置对象；此外无任何对外面。**

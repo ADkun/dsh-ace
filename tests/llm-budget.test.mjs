@@ -65,3 +65,66 @@ test('R45 oneShot｜maxMs 之下正常完成照常返回（预算只截断，不
   const out = await oneShot(ctx, { provider: 'p', model: 'm', system: 's', userText: 'u', maxMs: 5000 });
   assert.equal(out, '你好，世界');
 });
+
+// ── 第 48 轮健壮性缺口 B1：正文为空时说得清，而不是把空串交给上层去猜 ──
+// 线上那一次：模型把整段内容写进 reasoning 通道，text-delta 一个都没来，oneShot 返回 ''，
+// extractJsonObject 在空串上抛「未找到 JSON 对象」，耗时 72 秒（对方正常结束，不是超时）。
+// 现在 oneShot 自己抛一条带现场的错误，且**必须是普通错误** —— 不许被当成超时吞掉。
+
+test('R48 oneShot｜只有 reasoning-delta、没有 text-delta → 抛「正文为空」并带上 reasoning 字符数、耗时、provider/model', async () => {
+  const ctx = {
+    llm: {
+      async *stream() {
+        // 模拟线上那一趟：思考内容全在 reasoning 通道里，正文一格不留。
+        yield { type: 'reasoning-delta', text: '我在想该怎么回答'.repeat(10) }; // 8 × 10 = 80 字符
+        yield null; // 畸形块不许炸
+        yield { type: 'reasoning-delta', text: '嗯'.repeat(20) }; // +20 = 100 字符
+        yield { type: 'text-delta', text: '   ' }; // 纯空白也算空正文
+      },
+    },
+  };
+  const t0 = Date.now();
+  await assert.rejects(
+    oneShot(ctx, { provider: 'magpie', model: 'group/never-stuck', system: 's', userText: 'u' }),
+    (e) => {
+      const msg = e && e.message;
+      assert.ok(typeof msg === 'string' && msg.startsWith('ace: LLM 本次正文为空'), '必须是「正文为空」这条明确错误：' + msg);
+      assert.ok(msg.includes('reasoning 100 字符'), '要写 reasoning 通道收到多少字符（判断是不是全写进推理了）：' + msg);
+      assert.ok(/耗时 \d+ms/.test(msg), '要写耗时（判断是正常结束还是被截断）：' + msg);
+      assert.ok(msg.includes('magpie/group/never-stuck'), '要写 provider/model（判断是不是换了模型）：' + msg);
+      // 硬约束：这句话绝不能出现 —— 否则 lib/reflect.js 的 isTimeoutError 会把它当超时豁免掉，
+      // 真故障被静默吞成「本轮放弃」，复盘变成假成功。
+      assert.ok(!msg.includes('调用超时'), '不许带「调用超时」字样：' + msg);
+      return true;
+    },
+  );
+  const took = Date.now() - t0;
+  assert.ok(took < 3000, '空正文要立刻报错，不许等到超时：' + took + 'ms');
+});
+
+test('R48 oneShot｜错误不是超时：lib/reflect.js 的 isTimeoutError 口径（按 ace: LLM 调用超时 前缀认账）认不出来', async () => {
+  // 这一条不复用 reflect.js 的内部函数，直接按它的判据（startsWith 前缀）检查，
+  // 免得为了一个字符串断言去 import 宿主相关模块。
+  const ctx = { llm: { async *stream() { yield { type: 'reasoning-delta', text: '只有思考' }; } } };
+  const err = await oneShot(ctx, { provider: 'p', model: 'm', system: 's', userText: 'u' }).then(
+    () => null,
+    (e) => e,
+  );
+  assert.ok(err instanceof Error, '空正文必须抛错');
+  assert.equal(String(err.message).startsWith('ace: LLM 调用超时'), false, '不许被 isTimeoutError 认成超时');
+  assert.ok(err.message.startsWith('ace:'), '仍带 ace: 前缀，方便日志 grep');
+});
+
+test('R48 oneShot｜正常流不受影响：text-delta 照常累加，reasoning 不混进返回值', async () => {
+  const ctx = {
+    llm: {
+      async *stream() {
+        yield { type: 'reasoning-delta', text: '内部思考不该出现在结果里' };
+        yield { type: 'text-delta', text: '{"candidates":' };
+        yield { type: 'text-delta', text: '[]}' };
+      },
+    },
+  };
+  const out = await oneShot(ctx, { provider: 'p', model: 'm', system: 's', userText: 'u' });
+  assert.equal(out, '{"candidates":[]}', '正文串接结果不含 reasoning 内容');
+});
