@@ -219,12 +219,12 @@ summary: '自动复盘：本回合有 ' + pending.mutCount + ' 次 mutating 工�
 
 ### 多轮复盘：什么时候算「提炼完了」
 
-`reflectRounds({ callRound, maxRounds, logger })`（lib/reflect.js 的同名导出）跑最多 `REFLECT_MAX_ROUNDS = 3` 轮（:11），每轮把「此前已提炼的候选」一并喂回去，让模型接着往下想而不是重复第一轮：
+`reflectRounds({ callRound, maxRounds, logger })`（lib/reflect.js 的同名导出）跑最多 `REFLECT_MAX_ROUNDS = 2` 轮（:11），每轮把「此前已提炼的候选」一并喂回去，让模型接着往下想而不是重复第一轮：
 
 - **空数组即收敛**：某一轮返回 `[]` → `converged: true`，停止，保留已提炼的候选；
 - **第 1 轮抛错就上抛**：一条都没提炼到，等于这次复盘没跑成，交给上层按失败处理；
 - **后续轮抛错按已提炼落盘**：`aborted: true`，把已经拿到的候选交给落盘，不因为第 2 轮的网络抖动丢掉第 1 轮的成果；
-- **跑满 3 轮**：`converged: false`，按已有候选落盘（不无限追问）。
+- **跑满 2 轮**：`converged: false`，按已有候选落盘（不无限追问）。
 
 每轮都写一条 `dsh-ace: 多轮复盘第 N 轮产出 K 条候选（累计 M 条）`，收敛时写 `dsh-ace: 多轮复盘第 N 轮无新增候选，判定收敛（已提炼 M 条）`，中断时写 `dsh-ace: 多轮复盘第 N 轮中断（…），按已提炼的 M 条候选落盘`——日志能还原「这次为什么停在第几轮」。
 
@@ -373,9 +373,9 @@ summary: '自动复盘：本回合有 ' + pending.mutCount + ' 次 mutating 工�
 用户消息进会话时（`agent/inbox/inserted`）先做一次预检索，把「本回合最相关的几条经验」算好缓存；然后在**下一步进入时**（`agent/pre-step` waterfall，lib/inject-delivery.js）取走这一批，渲染成 `【ACE 自动注入】…` 块，**作为一条新的 user 消息追加到本步消息批次的末尾**——不改写系统提示（为什么必须这样，见下节）。
 
 - **排序键**（`rankInjection`，lib/inject.js）：第 33 轮起是**纯 BM25 相关度**，第 36 轮改回加权但只加「话题热度」这一项：`0.9 × 归一化相关度 + 0.1 × 归一化话题热度`（同分仍按 `idNumber` 数字升序兜底）。更早的 `0.85 × 归一化相关度 + 0.15 × 净分饱和` 已在第 33 轮随净分一起删掉。三条理由：① 净分已经不存在；② 权重是拍出来的，没有可验证的依据；③ 更要紧的是**自增强陷阱**——任何让「命中多的条目排得更前」的排序键都会把手册锁死在少数几条上（排前 → 更常被注入 → 更常命中 → 更排前），而最少使用淘汰恰好按 `hits` 排序，两者一叠加，新条目永远等不到第一次命中就被淘汰。所以 `hits` **绝不许进排序键**（tests/inject.test.mjs 的「k｜hits 高低不影响注入排序」钉住）。
-- **0 分条目不进候选**：本批最高分 ≤ 0 时整批丢弃（与当前任务零字面交集的经验不值得占 900 token），此时返回空注入、`injectedSkipped + 1`。
-- **预算**：条数与 token 预算都已提成配置项（第 36 轮）——`injectMaxEntries`（默认 5、可填 1–20）与 `injectTokenBudget`（默认 900、可填 100–8000），常量 `INJECT_MAX_ENTRIES = 5` / `INJECT_TOKEN_BUDGET = 900` 仍作兜底默认值（配置缺失/非法时回落）。第一条无条件取（否则相关度低一点就一条都注不进去），之后每加一条先试算整块 token，超预算就停；`rationale`（依据行）如果撑爆预算则整体关掉。
-- **token 估算**（`estimateTokens`）：不引 tokenizer，按字符类别加权——ASCII 字符 × 0.4、非 ASCII（含汉字）× 1.0，求和后先按 1e-6 精度取整再向上取整。0.4 是经验值（英文约 2.5 字符/token），1.0 是保守值（汉字约 1 字/token）。**这是估算不是计量**，所以预算留了余量（900 而不是贴着模型上限）。
+- **0 分条目不进候选**：本批最高分 ≤ 0 时整批丢弃（与当前任务零字面交集的经验不值得占 500 token），此时返回空注入、`injectedSkipped + 1`。
+- **预算**：条数与 token 预算都已提成配置项（第 36 轮）——`injectMaxEntries`（默认 5、可填 1–20）与 `injectTokenBudget`（默认 500、可填 100–8000），常量 `INJECT_MAX_ENTRIES = 5` / `INJECT_TOKEN_BUDGET = 500` 仍作兜底默认值（配置缺失/非法时回落）。第一条无条件取（否则相关度低一点就一条都注不进去），之后每加一条先试算整块 token，超预算就停；`rationale`（依据行）如果撑爆预算则整体关掉。
+- **token 估算**（`estimateTokens`）：不引 tokenizer，按字符类别加权——ASCII 字符 × 0.4、非 ASCII（含汉字）× 1.0，求和后先按 1e-6 精度取整再向上取整。0.4 是经验值（英文约 2.5 字符/token），1.0 是保守值（汉字约 1 字/token）。**这是估算不是计量**，所以预算留了余量（500 而不是贴着模型上限）。
 - **注入块形态**（`renderInjection`）：首行里的「最多 N 条」**必须说真话**——N 由生效配置 `injectMaxEntries` 经 `selectInjection` 的 `options.maxEntries` 透传进来（第 37 轮修：此前硬编码常量 5，配置成 8 时首行在说谎）；未传/传 0/传非法值一律回落 `INJECT_MAX_ENTRIES`（宁可说「最多 5 条」，也不说「最多 0 条」）。首行 `【ACE 自动注入】与本回合最相关的 N 条经验（按检索相关度排序，最多 N 条）：`，每条 `N. [id] 标题` + `   - 何时适用：…` + `   - 怎么做：…`（可选 `   - 依据：…`），末行提示可用 `ace_playbook` 查全量手册。**末行不再提归档**——归档条目不在任何会话里（第 33 轮）。
 - **绝不抛错**：投递（认领批次 → 造消息 → 追加）整段包在 try/catch 里（`createInjectionDelivery().onPreStep`），失败只写一条 warn、`injectedFailed + 1`、原样返回下游 decision——**pre-step 监听器抛错会打哑整回合**（与 section 回调抛错同一类事故模式），插件不能把宿主搞挂。系统提示段（lib/prompt-section.js）现在只有逐字常量，已经不需要任何 try/catch。
 
@@ -388,6 +388,32 @@ summary: '自动复盘：本回合有 ' + pending.mutCount + ' 次 mutating 工�
 - **为什么 0 相关度不许靠热度进入**：热度只能在**本来就有字面交集（`score > 0`）**的候选之间重排。若热度能把 0 分条目顶进候选，最热的那条经验在任何话题下都会被注进去，注入就退化成「always-on 的固定前缀」——既白花 token，也把「本回合相关」这个前提作废。`rankInjection` 因此先按 `score > 0` 过滤、再算 composite（tests/heat.test.mjs 的「热度 9999 也进不去」钉住）。
 - **归一化与确定性**：`heat[id] / 本轮候选里的最大 heat`；候选最大值为 0（或 heat 为空、缺键）时全部按 0 算，不出 NaN；`composite` 相同仍按 `idNumber` 升序，同一份输入两次跑必然给出同一个顺序。`options.heat` 传 Map 或普通对象都认。
 - **接线**（`lib/index.js`）：`agent/inbox/inserted` 里 `heatWindow.note(agent, query)` 是**同步**的（顺序 = 消息到达顺序），预检索再 `computeHeat(snapshot.entries, heatWindow.messagesOf(agent))` 传进 `selectInjection`。窗口是进程内状态，宿主重启即清空。
+
+### 自动注入的相关度门槛（第 49 轮）：手册里没相关经验时，宁可不注入
+
+**结论：候选层加两道门槛——绝对 `4.0 × IDF_MAX`（`IDF_MAX = log((N-1+0.5)/(1+0.5)+1)`，`N` = 活跃条目数）与相对 `0.6 × topScore`，取高者；`top1` 自己也要过门槛，整轮注入 0 条是合法结果。**
+
+- **为什么需要**：原来「`score > 0` 即入候选」只要求有字面交集，跨领域同词（「预算」「两种」「注意」）也够格，于是空真值回合 18/18 全被注入、平均 2.61 条——注入块在这些回合里退化成噪声前缀。参数不是拍的：60 回合真实评测集上扫过 3×/4×/5×/0.7/纯相对 2×/领域路由/只取 top1 七档，**4×IDF_MAX + 每条 ≥0.6×top1** 是唯一同时做到「空回合误伤 0 条、有真值回合覆盖率 100%」的档；纯相对判据把覆盖率砸到 69%，领域路由 81%。
+- **为什么门槛随 N 变**：`IDF_MAX` 是「只出现在一条里的词」的 idf 上限，手册越厚，这个上限越大，门槛自动跟着变严；写死常数会在手册增长后静默放宽（N=100 时 16.84、N=150 时 18.45）。
+- **为什么必须在热度加权之前**：热度只是 0.1 权重的重排信号（红线 14/17）。若先算 composite 再过滤，一条门槛以下但热度爆表的条目会把 composite 拉过线、混进注入块——等于让热度绕过相关度。`rankInjection` 因此先 `filter`、再算 `composite`；`lib/heat.js` 的 `computeHeat` 透传同一档门槛参数，保证「热度账」与「注入账」对得上。
+- **可关**：`injectMinScoreIdfRatio` / `injectMinRelativeToTop` 都允许 0（= 关掉那一半），两边都 0 即退回「有字面交集就注入」的旧行为。默认值是 `lib/inject.js` 的常量，`lib/index.js` 只引用、不另立一份。
+- **机检**：tests/inject.test.mjs 的 C5.8 五条（门槛算式 / 零任务意图注入 0 条 / 热度顶不进门槛以下条目 / N=100 与 N=150 门槛分裂点）；其余用例显式传 `{injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0}` 以钉住各自那件事。
+
+### 思考档位与自动降档（第 50 轮）：为什么「不传」等于没改
+
+**结论：默认把复盘的每一轮 LLM 调用显式降到该模型声明的最低档（`efforts[0]`）；降不了档的四种情形一律不干预、各落一条中文 warn；超时的那一轮用最低档再试一次，只试一次。**
+
+- **为什么必须显式传，不能靠「不传」**：会话默认档位的解析在 `~\dsh-llm-pi-ai\lib\index.js:1953` —— `resolveReasoningLevel(model, options.reasoningEffort ?? profile.reasoning)`。只要 profile 里写了 `reasoningEffort`（本机 `C:\Users\adkun\.dsh\profiles\web\cordis.patch.yml:12` 就写着 `high`），它会**盖过**模型自己的 `defaultEffort`。所以插件要想让复盘中档，唯一的办法是把 `GenerateOptions.reasoningEffort`（`~\dsh-llm\lib\types\types.d.ts:511`）显式写进请求；不传 = 沿用 profile 的 `high` = 等于没改。`lib/llm.js` 的 `oneShot` 因此只在**合法非空字符串**时才写这个键（缺省/空串不写），把「不干预」这件事表达成一个键的缺席。
+- **档位顺序的唯一出处**：`LlmResolvedModelInfo.reasoning.efforts`（`~\dsh-llm\lib\types\types.d.ts:367-375`），注释原文「Supported efforts from least to greatest selectable reasoning effort」——**数组就是由弱到强**，所以 `efforts[0].id` 是该模型声明的最低档，不需要另立排序表。单条形态是 `LlmReasoningEffortInfo = { id, name, description? }`（`:358-365`）。查询入口 `ctx.llm.resolveModelInfo(provider, model, signal?)`（`~\dsh-llm\lib\types\index.d.ts:377`），第三形参 signal 真透传（`~\dsh-llm\lib\types\index.js:604-610`）。
+- **绝不能硬发未声明的档位**：`~\dsh-llm-pi-ai\lib\index.js:1785-1789` —— 传了模型没声明的档位，宿主直接抛 `UNSUPPORTED_REASONING_EFFORT`。所以每一发都要先对着该模型的 `efforts` 校验：手填的值不在列表里就**丢弃 + warn + 回落自动降档**，不是「发出去让宿主裁决」。
+- **四条实测（按真实库跑出，写在这里当基准）**：`group/never-stuck`（当前会话模型）只声明 `high` → efforts 只有一项；`auto/deepseek-v4.1-flash` → `[low, high, xhigh]`；`auto/glm-5.3-flash` → `[off, low, medium, high, xhigh]`；`auto/minimax-m3.1-flash:free` → `[low, medium, high, xhigh, max]`。所以「可用集只有一项」「压根没有 reasoning 字段」这两种情形在这个生态里**是常态而不是边角**，必须走不干预，不能发一个等于没改的值。
+- **四种不干预情形（各自的 warn 文案不同，便于线上分清是哪一种）**：① `efforts` 只有一项 —— `dsh-ace: 模型 p/m 只声明了一个思考档位（Y），不自动降档`（降成唯一那档等于没改）；② 没有 `reasoning` 字段 / `efforts` 为空（非推理模型）—— `dsh-ace: 模型 p/m 未提供思考档位信息，不自动降档`；③ 查询失败或超时 —— `dsh-ace: <原因>，本次不降档`；④ `autoReasoningDowngrade` 为 `false` 且无手动值 —— 直接不传（`effective.reason = 'ace: 自动降档已关闭'`，不 warn）。**查询失败绝不许让复盘失败**：`queryModelEfforts` 永不抛，失败只回 `{ok:false,error}`，调用方降级成「不干预」继续走原路由——档位是优化项，不是复盘的依赖。
+- **查询的成本与超时**（`lib/reasoning.js`）：`AbortSignal.timeout(15000)` 透传 + `withinMs` 硬计时兜底（宿主 adapter 不理会 signal 也不会把复盘吊死），与 `lib/catalog.js` 的 `withTimeout` 同档。结果按 `provider\u0000model` 缓存在进程内 Map：**成功 10 分钟、失败 60 秒**（失败短一些，别让一次网络抽风把降档关一小时），上限 128 条后整表清空。缓存只为「一次复盘多轮调用只查一次」，**不落盘**（红线 9）。
+- **超时降档重试：为什么放在管线而不是 `lib/reflect.js`**：`reflectRounds` 是纯轮次编排（收敛判据、第一轮抛错上抛、后续轮按已提炼候选收尾），它**不该知道模型有哪几档**；「这轮为什么超时、降到哪一档、能不能降」是生产侧知识。所以重试挂在 `lib/recap-pipeline.js` 的 `callRound` 外层：catch 到 `isTimeoutError`（判据仍是 `lib/reflect.js` 的 `TIMEOUT_ERROR_PREFIX` 前缀，'上游报错：ace: LLM 调用超时…' 这种不算）且 `deps.downgradeEffort` 拿得出更低档，才 warn `dsh-ace: 多轮复盘第 R 轮超时，已降到最低档 X 重试一次` 并再调一次 `reflectRound`。**只有超时才重试**（普通错误照旧第一轮上抛、后续轮按既有语义收尾）；**最多一次**——重试那次的调用本身就是「已经降过档的那次」，它再超时就把错误原样上抛，绝不套第二层。重试失败时已回收的候选照常保留（第 49 轮的 `recoverCandidatesFromUnclosed` 在 `reflectRound` 里，位置没动），**不许假成功**。
+- **哪些调用共用这一档**：自动复盘每轮、满额合并的 `mergeAsk`、手动 `ace_reflect` 全走 `effortPlanFor(route)` 同一口径（同一个模型同一个决定），不同调用点各判一次只是为了配置改了能立刻生效。
+- **`GET /api/dsh-ace/efforts`**：设置页「思考强度」下拉的唯一数据源，也是 `effective` 的来源（`{effort, source:'manual'|'auto'|'none', reason?}`）——页面据此显示「现在实际会用什么档」，而不是让用户自己推断。只解析问到的这一个 `provider+model`（**绝不逐个 provider 全量解析**，那是 `/catalog` 的活）；不带参数时回落到 `agent/pre-step` 记下的「最近一次观察到的会话路由」；两者都没有就 `{ok:false,error:'ace: session model unknown'}`。所有失败路径都是结构化 JSON + 一条 warn，**绝不许 500**。
+- **`defaultEffort` 的语义契约（第 52 轮）**：`decodeModelEfforts` 只在「宿主声明了、**且那一档确实在 `efforts` 里**」时原样带出 `defaultEffort`；没声明就是 `undefined`，`lib/reasoning.js:112` 的 `...(defaultEffort === undefined ? {} : { defaultEffort })` 让它在 `GET /api/dsh-ace/efforts` 报文里**整体缺席**。**绝不许回落到 `efforts` 末项**：`efforts` 由弱到强排列、末项是最强档，那个值会以「宿主默认档」的名义出现在报文里 —— 等于插件凭空造一句宿主没说过的话（第 50 轮线上实测：`magpie` 全部 69 个模型都没声明 `defaultEffort`，旧回落让报文显示 `xhigh`）。这个字段只用于设置页展示「宿主自己会选哪档」，**决策路径不读它** —— `planReasoningEffort` 只用 `efforts[0]` 与手动值。机检：tests/r50-reasoning.test.mjs 的 R50-0（在声明集里 → 原样带出；不在声明集里 → `undefined`）。
+- **机检**：tests/r50-reasoning.test.mjs 的 R50-0…R50-10 十一条（纯逻辑 / 默认降档 / 手动优先 / 非法手动值丢弃 / 关闭开关 / 单档不干预 / 查询缺失·抛错·超时 / 恰好两次且第二次最低档 / 普通错误不重试 + 重试仍失败 / 配置面 16 键 / `/efforts` 五组断言含 405 与 unknown）。
 
 ### 命中账本：注入 → 回合边界一次原子写盘
 
@@ -544,8 +570,9 @@ GET /api/dsh-ace/stats
 | 摊平逻辑放 `lib/entries.js` 的纯函数（`toEntry` / `collectEntries`） | `toEntry(raw)` 把 `parsePlaybook` 的一条摊平成固定 10 字段（缺字段给空串/0/false），`collectEntries` 只吃解析结果或全文；单测可直接喂样例手册。`readPlaybookEntries` 只 `stat` + `readFile`，**不写盘、不加锁**，不碰 `withLock`/`writeFileAtomic`/`commit.js`/`merge.js` 任何写路径（红线 ②） |
 | 围栏与 405 口径照抄 `/catalog` / `/inbox` / `/stats` | 同一个 prefix handler 里先 `rejectionFor(req, ctx.get('connection'))` 做回环同源校验，再 `method !== 'GET'` 回 405；四条只读端点共用一套入口，不新增一套鉴权写法 |
 | 失败一律 `ok: true` + `reason` 降级，绝不 500 | `missing`（文件还不存在）/ `needs-session`（相对路径在 HTTP 面无会话工作目录，`resolvePlaybookFile` 抛 `RELATIVE_PATH_NEEDS_SESSION`）/ `unreadable`（读盘失败），三种都是结构化空态；`reason` 三分派，页面按 reason 渲染不同文案，不把降级当崩溃 |
-| 降级体与成功体**同形** | 成功体 6 键（`ok`/`entries`/`total`/`maxEntries`/`pathKind`/`playbookPath`），降级体只多一个 `reason`；旧版这里只发 5 键的 `emptyEntries`，客户端拿不到 `pathKind` 就只能猜 |
-| 排序与搜索放客户端 | 数据量上限就是 `maxEntries`（默认 100、硬上限 1000），全量一次取回本地过滤 + 排序，比让服务端做 `?q=&sort=&page=` 参数简单得多，也省掉一套服务端分页语义 |
+| 降级体与成功体**同形** | 成功体 8 键（`ok`/`entries`/`archived`/`total`/`archivedTotal`/`maxEntries`/`pathKind`/`playbookPath`，第 53 轮按下方接口块核准——此前写 6 键是第 33 轮加归档段时漏改），降级体只多一个 `reason`；旧版这里只发 5 键的 `emptyEntries`，客户端拿不到 `pathKind` 就只能猜 |
+| 排序与搜索放客户端 | 数据量上限就是 `maxEntries`（默认 100、硬上限 1000），全量一次取回本地过滤 + 排序 + 分页，比让服务端做 `?q=&sort=&page=` 参数简单得多，也省掉一套服务端分页语义。第 53 轮给归档分区补分页时沿用同一口径：`/entries` 已经一次性返回全量 `archived`，分页照旧做在客户端（`client.js` 的 `archivedView()`），不引入任何 `?page=` 参数、不动报文形状 |
+| 归档分区也分页（第 53 轮），页码与活跃分区**各自独立** | 归档是只读历史，条数只增不减，全量铺开没有上限——几十上百条就是几百行滚动。页长复用活跃分区的 `ENTRIES_PAGE_SIZE = 20`；页码必须是**另一个** state（`archivedPage`），两个分区的条目数毫无关系，共用一个页码会让「活跃翻到第 2 页 → 切归档也停在第 2 页」变成一个大概率不存在的页。分页条整份复用 `.ace-entries-pager` 系列类名与 `entriesPrev`/`entriesPage`/`entriesNext` 文案，样式与 VCP 暗色因此自动继承，不新造字体或配色 |
 | 懒加载：第一次切到该页才发请求 | 记录页不是默认页，页面打开时不请求；`handled` ref 记已处理的 `reloadToken`，切走再回来 `active` 变真但 `reloadToken` 没变 → 不重复请求，点「刷新」才重拉 |
 | 归档分区**只读**，没有删除/还原按钮 | 归档条目不参与检索/合并/注入，它们的价值是「历史还在文件里可查」；给它们做删除入口等于把「永不物理删除」这条红线交到一次误点击手上。要清理归档文件只能手工编辑 `archive.md` |
 | 手动归档另开一条**写**路由 `POST /api/dsh-ace/entries/archive`，不塞进 `/entries` 的 POST | `/entries` 的语义是「只读观察者」，往里塞写会让一条观察者端点长出副作用；写路由与 `/settings` 并列、走同一条围栏，语义边界干净。详见下一小节 |
@@ -574,7 +601,7 @@ GET /api/dsh-ace/entries
 }
 ```
 
-页面侧固定 20 条/页，搜索对 `id`/`title`/`condition`/`action`/`rationale` 五字段做大小写不敏感子串匹配，编号列按数字比较（`ace-2` 在 `ace-10` 之前，不是字典序），更新日期列按毫秒时间戳比较（第 33 轮起 `updated` 是毫秒精度，界面仍只显示到日）。
+页面侧**活跃与已归档两个分区都按 20 条/页分页**（同一个 `ENTRIES_PAGE_SIZE`，两套页码各自独立、互不影响；切分区把归档页码复位到第 1 页）——第 53 轮补的归档分页。搜索只作用于活跃分区，对 `id`/`title`/`condition`/`action`/`rationale` 五字段做大小写不敏感子串匹配，编号列按数字比较（`ace-2` 在 `ace-10` 之前，不是字典序），更新日期列按毫秒时间戳比较（第 33 轮起 `updated` 是毫秒精度，界面仍只显示到日）。
 
 ### 记录列表页：手动归档一条（HTTP 面上唯一的写路由）
 
@@ -724,7 +751,7 @@ POST /api/dsh-ace/entries/archive
 - 改候选判定/归档时：只动 `lib/archive.js` 的纯函数（`decideCandidates`/`resolveSupersedes`/`applyArchiveMoves`）与 `lib/evict.js` 的 `compareForEviction`/`planEvictions`，阈值都导出成常量；**不许在判定路径上加 LLM 调用**（唯一的例外是满额合并，见 `lib/merge-llm.js`），也不许让任何一条路径变成物理删除；候选过滤只剩「标题非空」，**不许重建三层闸门**；
 - 改淘汰顺序时：三级判据（`hits` 升序 → `created` 更早 → `idNumber`）是契约，**不许改成随机的、不许只按时间、不许引入任何分数或权重**；同分同秒必须由 id 兜底（tests/archive.test.mjs 守护用例①）；第 36 轮加的新条目保护期（`protectDays`）只许改「先取哪一组」，**绝不许让要腾出的 N 位变小**，也不许在「全都在保护期」时死锁——缺口一律用受保护组按同一全序补齐（tests/evict-protect.test.mjs 钉住）；
 - 改合并时：`planMerges` 必须**永不抛错**，调用方仍要保留自己的 try/catch；某对失败就换下一对，全部失败就直接淘汰腾位——**合并失败绝不许阻塞落盘**（tests/recap-pipeline.test.mjs 守护用例②）；第 37 轮起多一条：**adds > 0 且不满额时还会跑一次轻量合并**（阈值 0.75、最多 2 对，见 `MERGE_EAGER_*` 常量与 I11），它同样永不抛错、只 warn；改动时两套阈值与轮数都别动；
-- 改注入时：`lib/inject.js` 的排序键（**0.9 × 归一化相关度 + 0.1 × 归一化话题热度，同分按 id 数字升序**）与预算（`injectTokenBudget` 默认 900、`injectMaxEntries` 默认 5，常量仍作兜底默认）是契约；`hits` 绝不许进排序键；token 估算是**估算**，别把它当成精确计量去卡边界；**注入只许追加进历史（`agent/pre-step` 往 `decision.messages` 末尾插一条 user 消息），绝不许改写系统提示**——改前把注入渲染进 `ace-playbook` section，宿主原地重写首个系统节点，实测 cached 恒 8,320 tok、73 次切换累计重付 926.0K token；**注入块首行「最多 N 条」的 N 必须跟着生效配置走**（第 37 轮：经 `selectInjection` 的 `options.maxEntries` 透传给 `renderInjection`，未传/0/非法才回落常量），只改文案、不改取几条（I12）；
+- 改注入时：`lib/inject.js` 的排序键（**0.9 × 归一化相关度 + 0.1 × 归一化话题热度，同分按 id 数字升序**）与预算（`injectTokenBudget` 默认 500、`injectMaxEntries` 默认 5，常量仍作兜底默认）是契约；`hits` 绝不许进排序键；token 估算是**估算**，别把它当成精确计量去卡边界；**注入只许追加进历史（`agent/pre-step` 往 `decision.messages` 末尾插一条 user 消息），绝不许改写系统提示**——改前把注入渲染进 `ace-playbook` section，宿主原地重写首个系统节点，实测 cached 恒 8,320 tok、73 次切换累计重付 926.0K token；**注入块首行「最多 N 条」的 N 必须跟着生效配置走**（第 37 轮：经 `selectInjection` 的 `options.maxEntries` 透传给 `renderInjection`，未传/0/非法才回落常量），只改文案、不改取几条（I12）；
 - 改可观测时：只加内存计数器 + 一行 `dsh-ace: …` 日志，**不许为统计新增落盘文件**；新计数器要同时出现在 `runtimeSnapshot()` 与 `normalizeRuntime`（lib/stats.js）里，否则页面会显示 undefined；**页面只许渲染协议里真有的键**——第 34 轮删掉了设置页的「跳过 / 失败」两格：它们读的 `runtime.injectedSkipped` / `injectedFailed` 从来不在七键协议里，`num(undefined)` 兜成假 0，等于常年显示「一个数都没有」；计数器本体（`lib/index.js` 的 `skipped += 1` / `failed += 1`）保留、继续进日志，**但不许为了显示它们而给 runtime 加键**（七键是红线）；旧的计分计数器不许以任何形式加回来；**第 40 轮起多一条例外口径**：注入链路的诊断计数（`handled` / `earlyReturn` / `deliveries` / `failures` / `stall`）**不进 runtime 七键**，而是走 `injectionSnapshot()` 挂在 `/stats` 响应里一个**并列顶层键 `injection`** 上——它只给诊断用，页面不渲染它；要把它塞进七键就得同时改 `normalizeRuntime` 与页面，那是改协议、不是加计数；
 - 改时间戳时：`created`/`updated`/`lastHit` 一律走 `lib/timestamp.js` 的 `nowStamp`（毫秒精度本地 ISO），**排序用毫秒精度、界面只显示到日**——界面这一半由 `client.js` 的纯函数 `displayDay(value)` 兑现（`/^(\d{4})-(\d{2})-(\d{2})/` 取日期部分，认不出/空值一律 `'—'`），**设置页的所有渲染路径都必须走它**，不许再出现 `String(x.updated ?? '')` 直出（第 34 轮：29 字符毫秒戳塞进 84px 的日期列，且 `dayOf` 只给服务端统计落桶用）；旧日期格式必须照常解析，不许抛错；
 - 别动：`cordis.patch.yml` 的 id/name 配对；`inject` 数组只声明真正用到的服务。
@@ -738,7 +765,7 @@ POST /api/dsh-ace/entries/archive
 用户症状：DSH 启动后从第二条消息起完全无响应，必须任务管理器结束 node.exe。根因链：
 宿主 `runMaintenance(job)` 在 job 返回前一直保持 `phase.kind === 'maintenance'`，而 `wakeDriver` 在非
 idle 相位只置 `wakeRequested` 就 return —— 复盘不结束，之后到达的用户消息永远排队。
-dsh-ace 的自动复盘最长 8 次串行 LLM 调用（3 轮复盘 + 5 轮满额合并），provider 静默时可达小时级。
+dsh-ace 的自动复盘最长 7 次串行 LLM 调用（2 轮复盘 + 5 轮满额合并），provider 静默时可达小时级。
 
 本轮改动（全部增量，未删既有代码）：
 
@@ -747,13 +774,13 @@ dsh-ace 的自动复盘最长 8 次串行 LLM 调用（3 轮复盘 + 5 轮满额
   （手动 `/ace` 复盘当时**仍**走 `runMaintenance`：用户显式触发、显式等待，不涉及消息到达 ——
   **第 40 轮起此说不再成立**，手动 `/ace` 也改走同一条插件队列，见第 40 轮「缺陷 5」一节。）
 - **新增 `lib/recap-queue.js`（零 import）**：全局唯一复盘串行队列。
-  `RECAP_TOTAL_DEADLINE_MS = 120000`（90000–180000 的中值偏保守侧，与单次上限 75000 配比，
-  2 次单次调用即触顶）、`MAX_QUEUED_RECAPS = 2`。`enqueue(item, merge)` 支持把新回合并进
+  `RECAP_TOTAL_DEADLINE_MS = 300000`（第 49 轮由 120000 放宽：与单次上限 150000 配比，
+  恰好容得下 2 次单次调用；旧值 120000 只容得下 1.6 次，实测单次正常耗时 40.8s，稍长即整份放弃）、`MAX_QUEUED_RECAPS = 2`。`enqueue(item, merge)` 支持把新回合并进
   已在排队的那一份；`drain()` 用 `Promise.race([run(), deadline])`，到点**只放弃等待、不 abort 上游**
   （宿主的 `abortedCancelCause` 对没有 `kind` 字段的 abort reason 会走 `assertNever` 抛错，
   详见修复报告 5.1），并走 `onGiveUp` 通知用户「可重试」。
-- **单次 LLM 调用上限**：`lib/llm.js` 新增 `ONESHOT_TIMEOUT_MS = 75000`（比宿主 300000ms
-  stream idle 看门狗小一个数量级），`mergeSignals` 与调用方 signal 合并后透传给 `ctx.llm.stream`；
+- **单次 LLM 调用上限**：`lib/llm.js` 新增 `ONESHOT_TIMEOUT_MS = 75000`（第 49 轮放宽到 **150000**：
+  仍小于宿主 300000ms stream idle 看门狗，也 ≤ 总时限 300000 的 2/3 = 200000），`mergeSignals` 与调用方 signal 合并后透传给 `ctx.llm.stream`；
   本地超时抛 `'ace: LLM 调用超时（单次上限 ...ms）'`。
 - **超时只放弃那一轮**：`lib/reflect.js` 的 `reflectRounds` catch 改为「只吞带
   `ace: LLM 调用超时` 前缀的错误（第 1 轮也吞，按已提炼候选返回 aborted:true），普通错误仍原样上抛」。
@@ -950,7 +977,7 @@ try 块（`if (archiveFile)` 先挡掉了），所以 `keyed` 永远是非空字
   第 39 轮定的）。也就是说合并的 LLM 调用**从未开跑**，配对就已经吃满了预算 → 队列 abort → 检查点③
   抛错 → 什么都不落盘 → 手册还是满的 → 下一回合再来一遍。这条死循环用只读探针在真实手册上实测坐实
   （本轮不写手册内容进文档，数字见 FIX-REPORT-R45.md）。
-- **LLM 层（次生）**：即使配对瞬时完成，3 轮复盘 + 5 轮合并的理论最坏 8 次串行调用（单次上限 75s）
+- **LLM 层（次生）**：即使配对瞬时完成，2 轮复盘 + 5 轮合并的理论最坏 7 次串行调用（单次上限 75s）
   也没有任何一环知道自己还剩多少预算——复盘轮可以把合并的口粮吃光，合并轮可以把落盘的保底吃光。
 
 ### R3：scoreEntries 加 tf 缓存（lib/playbook.js，纯缓存，打分口径一字未改）
