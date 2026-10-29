@@ -104,10 +104,12 @@ test.after(() => {
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
 });
 
-test('配置①：Config 声明了五个可调字段（共 16 个），默认值 14 / 500 / 5 / 4 / 0.6', () => {
+test('配置①：Config 声明了五个可调字段（共 17 个），默认值 14 / 500 / 5 / 4 / 0.6', () => {
   const keys = Object.keys(plugin.Config.fields);
   // 第 50 轮：加了 reflectReasoningEffort / autoReasoningDowngrade 两个思考档位键 → 16。
-  assert.equal(keys.length, 16, 'Config 必须是 16 个字段：' + keys.join(','));
+  // 第 55 轮：加了注入依据开关 injectRationale（布尔，默认 false）→ 17。
+  assert.equal(keys.length, 17, 'Config 必须是 17 个字段：' + keys.join(','));
+  assert.ok(keys.includes('injectRationale'), '注入依据开关必须在 Config 里');
   for (const key of FIVE) assert.equal(keys.includes(key), true, '缺字段 ' + key);
   for (const key of FIVE) {
     assert.equal(plugin.Config.fields[key].defaultValue, DEFAULTS[key], key + ' 的默认值不对');
@@ -273,7 +275,7 @@ test('配置④：读出坏值时的回落口径 —— 缺省键回落默认值
   assert.equal(body.stored.evictProtectDays, 0);
 
   // 越界值读入时丢弃 + warn，绝不带着坏值跑。
-  fs.writeFileSync(file, JSON.stringify({ evictProtectDays: 999, injectTokenBudget: -1, injectMaxEntries: 0, injectMinScoreIdfRatio: 25, injectMinRelativeToTop: 2 }), 'utf8');
+  fs.writeFileSync(file, JSON.stringify({ evictProtectDays: 999, injectTokenBudget: -1, injectMaxEntries: 0, injectMinScoreIdfRatio: 25, injectMinRelativeToTop: 2, injectRationale: 'yes' }), 'utf8');
   fresh = remount();
   body = (await callRoute(fresh.handler, 'GET', '/api/dsh-ace/settings')).body;
   assert.equal(body.value.evictProtectDays, DEFAULTS.evictProtectDays);
@@ -284,4 +286,7 @@ test('配置④：读出坏值时的回落口径 —— 缺省键回落默认值
   assert.ok(fresh.warns.includes('injectMaxEntries'));
   assert.ok(fresh.warns.includes('injectMinScoreIdfRatio'), '小数门槛的越界值同样要 warn：' + fresh.warns);
   assert.ok(fresh.warns.includes('injectMinRelativeToTop'));
+  // 第 55 轮：布尔键的坏值同样要 warn（autoReflect 那种「静默丢弃」对新键不适用）。
+  assert.ok(fresh.warns.includes('injectRationale'), '布尔键的非法值也要 warn：' + fresh.warns);
+  assert.equal(body.value.injectRationale, false, '坏值必须回落默认 false');
 });

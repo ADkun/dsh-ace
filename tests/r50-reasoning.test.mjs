@@ -435,16 +435,16 @@ test('R50-8｜重试仍失败：普通错误不重试并上抛；超时重试仍
 });
 
 // —— 9：两个新配置键的读写边界 ——
-test('R50-9｜新键配置面：默认值 / bounds / POST 落盘读回 / 非法档位 400 / 读盘归一 / 白名单 16 键', async () => {
+test('R50-9｜新键配置面：默认值 / bounds / POST 落盘读回 / 非法档位 400 / 读盘归一 / 白名单 17 键', async () => {
   const file = path.join(ROOT, 'config', 'playbook.md');
   const host = makeHost({ playbookPath: file, script: () => [] });
   const handler = mountApi(host);
   const settingsOf = () => callRoute(handler, 'GET', '/api/dsh-ace/settings');
   const put = (body) => callRoute(handler, 'POST', '/api/dsh-ace/settings', body);
 
-  // schema 默认值 + 白名单 16 键（Config.fields 是设置页的唯一边界出处）
+  // schema 默认值 + 白名单 17 键（Config.fields 是设置页的唯一边界出处；第 55 轮加 injectRationale）
   const keys = Object.keys(plugin.Config.fields);
-  assert.equal(keys.length, 16, 'Config 必须是 16 个字段：' + keys.join(','));
+  assert.equal(keys.length, 17, 'Config 必须是 17 个字段：' + keys.join(','));
   assert.ok(keys.includes('reflectReasoningEffort') && keys.includes('autoReasoningDowngrade'), keys.join(','));
   assert.equal(plugin.Config.fields.reflectReasoningEffort.defaultValue, '', '默认 = 未手动指定');
   assert.equal(plugin.Config.fields.autoReasoningDowngrade.defaultValue, true, '自动降档默认开');

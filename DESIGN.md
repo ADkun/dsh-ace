@@ -374,9 +374,9 @@ summary: '自动复盘：本回合有 ' + pending.mutCount + ' 次 mutating 工�
 
 - **排序键**（`rankInjection`，lib/inject.js）：第 33 轮起是**纯 BM25 相关度**，第 36 轮改回加权但只加「话题热度」这一项：`0.9 × 归一化相关度 + 0.1 × 归一化话题热度`（同分仍按 `idNumber` 数字升序兜底）。更早的 `0.85 × 归一化相关度 + 0.15 × 净分饱和` 已在第 33 轮随净分一起删掉。三条理由：① 净分已经不存在；② 权重是拍出来的，没有可验证的依据；③ 更要紧的是**自增强陷阱**——任何让「命中多的条目排得更前」的排序键都会把手册锁死在少数几条上（排前 → 更常被注入 → 更常命中 → 更排前），而最少使用淘汰恰好按 `hits` 排序，两者一叠加，新条目永远等不到第一次命中就被淘汰。所以 `hits` **绝不许进排序键**（tests/inject.test.mjs 的「k｜hits 高低不影响注入排序」钉住）。
 - **0 分条目不进候选**：本批最高分 ≤ 0 时整批丢弃（与当前任务零字面交集的经验不值得占 500 token），此时返回空注入、`injectedSkipped + 1`。
-- **预算**：条数与 token 预算都已提成配置项（第 36 轮）——`injectMaxEntries`（默认 5、可填 1–20）与 `injectTokenBudget`（默认 500、可填 100–8000），常量 `INJECT_MAX_ENTRIES = 5` / `INJECT_TOKEN_BUDGET = 500` 仍作兜底默认值（配置缺失/非法时回落）。第一条无条件取（否则相关度低一点就一条都注不进去），之后每加一条先试算整块 token，超预算就停；`rationale`（依据行）如果撑爆预算则整体关掉。
+- **预算**：条数与 token 预算都已提成配置项（第 36 轮）——`injectMaxEntries`（默认 5、可填 1–20）与 `injectTokenBudget`（默认 500、可填 100–8000），常量 `INJECT_MAX_ENTRIES = 5` / `INJECT_TOKEN_BUDGET = 500` 仍作兜底默认值（配置缺失/非法时回落）。第一条无条件取（否则相关度低一点就一条都注不进去），之后每加一条先试算整块 token，超预算就停；`rationale`（依据行）如果撑爆预算则整体关掉（**第 55 轮**：依据行本身由配置项 `injectRationale` 决定带不带，默认 `false` = 注入块只有「标题｜条件｜做法」三行，省 token；打开 = 与旧行为一致，每批多花约 26% token（生产默认 500 token 预算口径 100 批实测；预算越松、依据越长时增幅更大）。生产路径由 `lib/index.js` 的 `injectRationaleOf(live.injectRationale)` 经 `selectInjection` 的 `options.withRationale` 透传，热更新即时生效；**这条预算降级仍然照旧生效**——开了依据却撑爆预算时整体回落成不带依据，不截断依据正文）。
 - **token 估算**（`estimateTokens`）：不引 tokenizer，按字符类别加权——ASCII 字符 × 0.4、非 ASCII（含汉字）× 1.0，求和后先按 1e-6 精度取整再向上取整。0.4 是经验值（英文约 2.5 字符/token），1.0 是保守值（汉字约 1 字/token）。**这是估算不是计量**，所以预算留了余量（500 而不是贴着模型上限）。
-- **注入块形态**（`renderInjection`）：首行里的「最多 N 条」**必须说真话**——N 由生效配置 `injectMaxEntries` 经 `selectInjection` 的 `options.maxEntries` 透传进来（第 37 轮修：此前硬编码常量 5，配置成 8 时首行在说谎）；未传/传 0/传非法值一律回落 `INJECT_MAX_ENTRIES`（宁可说「最多 5 条」，也不说「最多 0 条」）。首行 `【ACE 自动注入】与本回合最相关的 N 条经验（按检索相关度排序，最多 N 条）：`，每条 `N. [id] 标题` + `   - 何时适用：…` + `   - 怎么做：…`（可选 `   - 依据：…`），末行提示可用 `ace_playbook` 查全量手册。**末行不再提归档**——归档条目不在任何会话里（第 33 轮）。
+- **注入块形态**（`renderInjection`）：首行里的「最多 N 条」**必须说真话**——N 由生效配置 `injectMaxEntries` 经 `selectInjection` 的 `options.maxEntries` 透传进来（第 37 轮修：此前硬编码常量 5，配置成 8 时首行在说谎）；未传/传 0/传非法值一律回落 `INJECT_MAX_ENTRIES`（宁可说「最多 5 条」，也不说「最多 0 条」）。首行 `【ACE 自动注入】与本回合最相关的 N 条经验（按检索相关度排序，最多 N 条）：`，每条 `N. [id] 标题` + `   - 何时适用：…` + `   - 怎么做：…` + 仅当配置 `injectRationale` 打开且该条有依据时多一行 `   - 依据：…`（**默认不带**，第 55 轮从配置开关注入；依据正文按原文整体渲染，任何情况下都不截断），末行提示可用 `ace_playbook` 查全量手册。**末行不再提归档**——归档条目不在任何会话里（第 33 轮）。
 - **绝不抛错**：投递（认领批次 → 造消息 → 追加）整段包在 try/catch 里（`createInjectionDelivery().onPreStep`），失败只写一条 warn、`injectedFailed + 1`、原样返回下游 decision——**pre-step 监听器抛错会打哑整回合**（与 section 回调抛错同一类事故模式），插件不能把宿主搞挂。系统提示段（lib/prompt-section.js）现在只有逐字常量，已经不需要任何 try/catch。
 
 ### 话题热度（第 36 轮）：只由用户消息驱动，且不许绕过相关度
@@ -388,6 +388,14 @@ summary: '自动复盘：本回合有 ' + pending.mutCount + ' 次 mutating 工�
 - **为什么 0 相关度不许靠热度进入**：热度只能在**本来就有字面交集（`score > 0`）**的候选之间重排。若热度能把 0 分条目顶进候选，最热的那条经验在任何话题下都会被注进去，注入就退化成「always-on 的固定前缀」——既白花 token，也把「本回合相关」这个前提作废。`rankInjection` 因此先按 `score > 0` 过滤、再算 composite（tests/heat.test.mjs 的「热度 9999 也进不去」钉住）。
 - **归一化与确定性**：`heat[id] / 本轮候选里的最大 heat`；候选最大值为 0（或 heat 为空、缺键）时全部按 0 算，不出 NaN；`composite` 相同仍按 `idNumber` 升序，同一份输入两次跑必然给出同一个顺序。`options.heat` 传 Map 或普通对象都认。
 - **接线**（`lib/index.js`）：`agent/inbox/inserted` 里 `heatWindow.note(agent, query)` 是**同步**的（顺序 = 消息到达顺序），预检索再 `computeHeat(snapshot.entries, heatWindow.messagesOf(agent))` 传进 `selectInjection`。窗口是进程内状态，宿主重启即清空。
+
+### 注入依据开关（第 55 轮）：默认关，设置页可打开
+
+**结论：注入块**默认不带 `   - 依据：…` 行**（生产默认 500 token 预算口径、100 批实测平均省 26% token；预算越松、依据越长增幅越大，把预算放宽到真装满 5 条实测 +37.7%–+40.5%，上限取决于依据长度），要不要带由配置项 `injectRationale`（boolean，默认 `false`）决定；打开后与旧版逐字一致。**
+
+- **为什么是配置项而不是写死**：`selectInjection` 的 `options.withRationale === true` 本来是「保持可配置」的开关（lib/inject.js 注释里写着可由调用方显式回开），但生产路径上没有任何地方传过这个键，等于依据行在真实插件里**永久关闭**、只有测试能打开——这不是「省 token 的方案」，是「开关丢了」。补一条配置把它变成用户可选的档位。
+- **透传口径**：`lib/index.js` 的预检索处读生效配置 `injectRationaleOf(live.injectRationale)`（`live` 是设置页保存后原地更新的当前生效值，所以**热更新天然生效**，不需要重启），作为 `options.withRationale` 传给 `selectInjection`。取值语义照 `validFlag`：`true` / `false` 原样，字符串 `'true'` / `'false'` 收敛，其余（含 `undefined` = 没设）一律回落**默认 `false`**。
+- **范围**：只影响「依据行带不带」，**不碰**取几条、预算、排序键、门槛、注入去重；依据正文**永不截断**（用户在 `action` 上明确要求过不截取，依据同理——只有在开关打开时才出现，出现就整行给全；预算不够时整行省掉、绝不做半截截断）。机检：tests/r55-inject-rationale.test.mjs 的 R55-2（默认 0 次「依据」）/ R55-3（打开后恰好多一行且原文完整）/ R55-6（保存后立即生效）。
 
 ### 自动注入的相关度门槛（第 49 轮）：手册里没相关经验时，宁可不注入
 

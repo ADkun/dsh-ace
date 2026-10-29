@@ -401,8 +401,9 @@ test('P0-7｜lib/index.js 真 import 成功，导出入口契约 { name, inject,
   // 第 36 轮加了三个可调项（evictProtectDays / injectTokenBudget / injectMaxEntries）→ 9 + 3 = 12；
   // 第 49 轮又加两个注入门槛项（injectMinScoreIdfRatio / injectMinRelativeToTop）→ 14。
   // 第 50 轮加思考档位两项（reflectReasoningEffort / autoReasoningDowngrade）→ 16。
-  assert.equal(Object.keys(plugin.Config.fields).length, 16, 'Config 十六个字段');
-  for (const key of ['playbookPath', 'autoReflect', 'reflectProvider', 'reflectModel', 'maxEntries', 'evictProtectDays', 'injectTokenBudget', 'injectMaxEntries', 'injectMinScoreIdfRatio', 'injectMinRelativeToTop', 'autoRecap', 'autoRecapThreshold', 'autoRecapCooldownTurns', 'autoReviewInbox', 'reflectReasoningEffort', 'autoReasoningDowngrade']) {
+  // 第 55 轮加注入依据开关 injectRationale → 17。
+  assert.equal(Object.keys(plugin.Config.fields).length, 17, 'Config 十七个字段');
+  for (const key of ['playbookPath', 'autoReflect', 'reflectProvider', 'reflectModel', 'maxEntries', 'evictProtectDays', 'injectTokenBudget', 'injectMaxEntries', 'injectMinScoreIdfRatio', 'injectMinRelativeToTop', 'injectRationale', 'autoRecap', 'autoRecapThreshold', 'autoRecapCooldownTurns', 'autoReviewInbox', 'reflectReasoningEffort', 'autoReasoningDowngrade']) {
     assert.ok(plugin.Config.fields[key], 'Config 缺字段 ' + key);
   }
 });
