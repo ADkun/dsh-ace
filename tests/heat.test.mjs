@@ -13,6 +13,8 @@ import {
   RELEVANCE_WEIGHT,
   createHeatWindow,
   computeHeat,
+  heatMemoSize,
+  clearHeatRankMemo,
 } from '../lib/heat.js';
 import { rankInjection, selectInjection, INJECT_MAX_ENTRIES } from '../lib/inject.js';
 
@@ -29,6 +31,11 @@ function entry(id, spec = {}) {
 }
 
 const ids = (listed) => listed.map((item) => item.entry.id);
+
+// 绝对门槛（4.0 × IDF_MAX）另有一组专门用例（tests/inject.test.mjs 的 C5.8）。
+// 本文件钉的是「热度只改顺序、不许制造相关度」，为免低 N 夹具被门槛挡空，
+// 统一把绝对门槛关掉（0 = 关）——断言语义一个字都不变。
+const GATE_OFF = { injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0 };
 
 test('热度①：常量按用户拍板的取值导出（窗口 30 条 / 每条最多 3 条 / 权重 0.9 相关度 + 0.1 热度）', () => {
   assert.equal(HEAT_WINDOW_MESSAGES, 30);
@@ -83,42 +90,42 @@ test('热度①：窗口只收「有正文的用户消息」—— 空白/空串
 
 test('热度②：computeHeat 只认用户消息 —— 同一条消息命中的前 3 条各 +1', () => {
   const entries = [entry('ace-001'), entry('ace-002'), entry('ace-003')];
-  const counts = computeHeat(entries, ['数据库迁移前先备份']);
+  const counts = computeHeat(entries, ['数据库迁移前先备份'], GATE_OFF);
   assert.equal(counts.get('ace-001'), 1);
   assert.equal(counts.get('ace-002'), 1);
   assert.equal(counts.get('ace-003'), 1);
 
-  const twice = computeHeat(entries, ['数据库迁移前先备份', '数据库迁移前先备份']);
+  const twice = computeHeat(entries, ['数据库迁移前先备份', '数据库迁移前先备份'], GATE_OFF);
   assert.equal(twice.get('ace-001'), 2, '同一话题在窗口里出现两次就记 2 点');
   assert.equal(twice.get('ace-002'), 2);
 });
 
 test('热度②：computeHeat 的每条消息最多记 topPerMessage 条（默认 3，可覆盖）', () => {
   const entries = [1, 2, 3, 4, 5].map((n) => entry('ace-00' + n));
-  const defaults = computeHeat(entries, ['数据库迁移前先备份']);
+  const defaults = computeHeat(entries, ['数据库迁移前先备份'], GATE_OFF);
   assert.equal(defaults.size, HEAT_TOP_PER_MESSAGE, '默认每条消息只给前 3 条加 1 点');
   assert.equal([...defaults.values()].every((v) => v === 1), true, '每条命中只加 1 点，不是加分数');
 
-  const capped = computeHeat(entries, ['数据库迁移前先备份'], { topPerMessage: 1 });
+  const capped = computeHeat(entries, ['数据库迁移前先备份'], { ...GATE_OFF, topPerMessage: 1 });
   assert.equal(capped.size, 1, 'topPerMessage=1 时每条消息只认第 1 名');
 });
 
 test('热度②（反自增强）：把热度图喂回 computeHeat 也不改任何计数 —— 注入结果绝不回流', () => {
   const entries = [entry('ace-001'), entry('ace-002'), entry('ace-003')];
   const messages = ['数据库迁移前先备份', '要改数据库结构时怎么做'];
-  const baseline = computeHeat(entries, messages);
+  const baseline = computeHeat(entries, messages, GATE_OFF);
   const baselineList = [...baseline.entries()];
 
   // 伪造一份「注入已经把 ace-003 捧上天」的热度图，连同注入文本一起喂回去。
   const spilled = new Map([['ace-003', 999]]);
-  const again = computeHeat(entries, messages, { heat: spilled, topPerMessage: 3 });
+  const again = computeHeat(entries, messages, { ...GATE_OFF, heat: spilled, topPerMessage: 3 });
   assert.deepEqual([...again.entries()], baselineList, '热度和注入结果都不许改变 computeHeat 的计数');
   assert.equal(again.get('ace-003'), baseline.get('ace-003'), '被注入过的条目热度不许自己涨');
 
   // 排序侧也一样稳：带着同一份 heat 反复排，顺序与综合分一字不变（注入结果不许回流进排序）。
-  const once = rankInjection(entries, '数据库迁移前先备份', { heat: spilled });
+  const once = rankInjection(entries, '数据库迁移前先备份', { ...GATE_OFF, heat: spilled });
   for (let i = 0; i < 3; i += 1) {
-    const again = rankInjection(entries, '数据库迁移前先备份', { heat: spilled });
+    const again = rankInjection(entries, '数据库迁移前先备份', { ...GATE_OFF, heat: spilled });
     assert.deepEqual(ids(again.ranked), ids(once.ranked), '同一输入重复排序必须给出同一顺序');
     assert.deepEqual(again.ranked.map((item) => item.composite), once.ranked.map((item) => item.composite), '综合分不许漂移');
   }
@@ -135,7 +142,7 @@ test('热度②：computeHeat 空输入安全 —— 没有条目/没有消息 �
 test('热度③：rankInjection 不传 heat 时与旧行为一致（纯 BM25 + 同分按 id 升序）', () => {
   const same = { title: '数据库迁移前先备份', condition: '要改数据库结构时', action: '先导出快照再迁移' };
   const entries = [entry('ace-001', same), entry('ace-002', same), entry('ace-003', same)];
-  const { ranked } = rankInjection(entries, '数据库迁移前先备份');
+  const { ranked } = rankInjection(entries, '数据库迁移前先备份', GATE_OFF);
   assert.deepEqual(ids(ranked), ['ace-001', 'ace-002', 'ace-003'], '同分时仍按 id 数字升序');
   assert.equal(ranked[0].relevance, 1);
 });
@@ -143,17 +150,17 @@ test('热度③：rankInjection 不传 heat 时与旧行为一致（纯 BM25 + �
 test('热度③：heat 能改变排序 —— 同分条目里热度高的排到前面（热度只重排已有字面交集的条目）', () => {
   const same = { title: '数据库迁移前先备份', condition: '要改数据库结构时', action: '先导出快照再迁移' };
   const entries = [entry('ace-001', same), entry('ace-002', same), entry('ace-003', same)];
-  const plain = rankInjection(entries, '数据库迁移前先备份');
+  const plain = rankInjection(entries, '数据库迁移前先备份', GATE_OFF);
   assert.deepEqual(ids(plain.ranked), ['ace-001', 'ace-002', 'ace-003'], '没有热度时是 id 升序');
 
-  const heated = rankInjection(entries, '数据库迁移前先备份', { heat: new Map([['ace-003', 3]]) });
+  const heated = rankInjection(entries, '数据库迁移前先备份', { ...GATE_OFF, heat: new Map([['ace-003', 3]]) });
   assert.deepEqual(ids(heated.ranked), ['ace-003', 'ace-001', 'ace-002'], '热度高的先排，其余仍按 id 升序');
   assert.equal(heated.ranked[0].relevance, 1, '相关度不受热度影响（热度只做 0.1 的加分项）');
   assert.equal(heated.ranked[0].heat, 1, '归一化热度：本条是候选里最高的 → 1');
   assert.equal(heated.ranked[1].heat, 0, '没热度的条目归一化到 0');
 
   // 普通对象与 Map 等价（配置/JSON 往返后不该改变排序）。
-  const asObject = rankInjection(entries, '数据库迁移前先备份', { heat: { 'ace-003': 3 } });
+  const asObject = rankInjection(entries, '数据库迁移前先备份', { ...GATE_OFF, heat: { 'ace-003': 3 } });
   assert.deepEqual(ids(asObject.ranked), ids(heated.ranked), '普通对象与 Map 的 heat 必须等价');
 });
 
@@ -173,7 +180,7 @@ test('热度③：候选里最大热度为 0 时全部按 0 算 —— 不许因
   const same = { title: '数据库迁移前先备份', condition: '要改数据库结构时', action: '先导出快照再迁移' };
   const entries = [entry('ace-001', same), entry('ace-002', same)];
   for (const heat of [new Map(), {}, new Map([['ace-099', 5]]), null, undefined, new Map([['ace-001', 0]])]) {
-    const { ranked } = rankInjection(entries, '数据库迁移前先备份', { heat });
+    const { ranked } = rankInjection(entries, '数据库迁移前先备份', { ...GATE_OFF, heat });
     assert.deepEqual(ids(ranked), ['ace-001', 'ace-002'], '没有候选热度时保持 id 升序');
     for (const item of ranked) {
       assert.equal(Number.isFinite(item.composite), true, '综合分必须是有限数：' + JSON.stringify(item.composite));
@@ -186,10 +193,10 @@ test('热度③：selectInjection 透传 heat —— 排序真的按热度重排
   const same = { title: '数据库迁移前先备份', condition: '要改数据库结构时', action: '先导出快照再迁移' };
   const entries = [entry('ace-001', same), entry('ace-002', same)];
   const heat = new Map([['ace-002', 2]]);
-  const first = selectInjection(entries, '数据库迁移前先备份', { heat, maxEntries: INJECT_MAX_ENTRIES });
+  const first = selectInjection(entries, '数据库迁移前先备份', { ...GATE_OFF, heat, maxEntries: INJECT_MAX_ENTRIES });
   assert.deepEqual(first.ids, ['ace-002', 'ace-001'], '热度高的排前面');
   for (let i = 0; i < 3; i += 1) {
-    const again = selectInjection(entries, '数据库迁移前先备份', { heat, maxEntries: INJECT_MAX_ENTRIES });
+    const again = selectInjection(entries, '数据库迁移前先备份', { ...GATE_OFF, heat, maxEntries: INJECT_MAX_ENTRIES });
     assert.deepEqual(again.ids, first.ids, '同一输入重复调用必须给出同一顺序');
     assert.equal(again.text, first.text, '注入正文也必须逐字相同（注入结果不许回流影响后续排序）');
   }
@@ -210,4 +217,22 @@ test('热度③（端到端）：computeHeat 的计数直接当 heat 喂给 sele
   assert.deepEqual(picked.ids, ['ace-001', 'ace-002'], '候选只能是真有字面交集的条目，热度不许把 ace-003 拉进来');
   // 与直接调 rankInjection 的顺序一致（selectInjection 只是透传 heat，没有第二套排序）。
   assert.deepEqual(picked.ids, ids(rankInjection(entries, '数据库迁移前先备份', { heat }).ranked));
+});
+
+test('D2｜computeHeat 记忆化：同一批消息重复计算计数不变、只命中缓存；clear 可清空', () => {
+  clearHeatRankMemo();
+  const entries = [
+    entry('ace-001'),
+    entry('ace-002'),
+    entry('ace-003', { title: 'CSS 布局一律用 grid', condition: '要写页面布局时', action: '直接用 grid 排版' }),
+  ];
+  const messages = ['数据库迁移前先备份', '要改数据库结构时', 'CSS 布局一律用 grid'];
+  const first = computeHeat(entries, messages);
+  const sizeAfterFirst = heatMemoSize();
+  assert.ok(sizeAfterFirst > 0, '应当写入了记忆化缓存');
+  const second = computeHeat(entries, messages);
+  assert.deepEqual([...second.entries()].sort(), [...first.entries()].sort(), '重复计算计数不变');
+  assert.equal(heatMemoSize(), sizeAfterFirst, '同一批消息再次计算只命中缓存、不新增条目');
+  clearHeatRankMemo();
+  assert.equal(heatMemoSize(), 0, 'clear 后缓存清空');
 });

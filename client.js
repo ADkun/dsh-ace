@@ -20,6 +20,11 @@ window.__ModuleLoader__.load({
     const ROUTE = '/api/dsh-ace/settings';
     // 模型目录（宿主 lib/index.js 的 GET /catalog）：两个下拉的数据源。
     const CATALOG_ROUTE = '/api/dsh-ace/catalog';
+    // 思考强度档位：按 provider/model 查该模型声明了哪些档位（不带参数时后端用最近观察到的会话模型）。
+    const EFFORTS_ROUTE = '/api/dsh-ace/efforts';
+    // 后端钉死的七个合法档位名（小写）。前端只提交这些值：收到别的值一律当「该模型未声明档位」，
+    // 绝不让一个宿主流派发不出去的字符串进配置。
+    const EFFORT_LEVEL_IDS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
     // 待合并复审列表（宿主 lib/index.js 的 GET /inbox）：只读，失败时静默降级。
     const INBOX_ROUTE = '/api/dsh-ace/inbox';
     // 手册统计（宿主 lib/index.js 的 GET /stats）：只读，失败时静默降级成一行灰字。
@@ -57,6 +62,18 @@ window.__ModuleLoader__.load({
       pickClear: '跟随会话模型（清空）',
       catalogLoading: '正在读取模型目录…',
       catalogFailed: '模型目录读取失败：宿主可能还没重启（其余字段照常可用）',
+      fieldReasoningEffort: '思考强度',
+      fieldReasoningEffortDesc: '手动指定 Reflector/Curator 用哪一档思考强度；留空 = 跟随自动降档（由会话模型声明的档位决定，改选 provider/model 会重新读取）',
+      pickEffortPlaceholder: '跟随自动（不指定）',
+      pickEffortClear: '不指定（跟随自动降档）',
+      pickEffortSearch: '搜索思考档位…',
+      pickNoMatchEffort: '没有匹配的档位',
+      effortsFailed: '该模型未声明思考档位',
+      effortsAutoNow: '当前会自动使用：{name}',
+      effortsNoneFallback: '当前模型没有可用的思考档位，这一项不影响其它设置。',
+      effortsStaleCleared: '原来选的档位不在新模型的声明列表里，已清空为「不指定」。',
+      fieldAutoReasoningDowngrade: '自动降到最低思考档',
+      fieldAutoReasoningDowngradeDesc: '回合开始时把思考档位自动降到该模型支持的最低一档，省下推理预算；关掉 = 完全按手动档位走',
       warnPair: '只有 provider 与 model 两项都填才生效；只填一项会静默回落到会话模型。',
       fieldMaxEntries: '手册容量上限',
       fieldMaxEntriesDesc: '满额后先由 LLM 把相近的两条合并成一条，仍超则按命中次数从少到多淘汰（搬进同目录的 archive.md，永不物理删除）（默认 {d}，可填 {min}–{max}）',
@@ -66,6 +83,10 @@ window.__ModuleLoader__.load({
       fieldInjectTokenBudgetDesc: '每回合自动注入块的 token 估算上限（ASCII ×0.4 + 汉字 ×1.0 粗略折算）。调小 = 注入更少内容、更省 token 与上下文（超预算的条目直接不注入）；调大 = 多注几条。默认 {d}，可填 {min}–{max}',
       fieldInjectMaxEntries: '一次注入最多几条',
       fieldInjectMaxEntriesDesc: '每回合自动注入最多塞进几条经验。调小 = 更少注入更省 token（默认 5 条之外的候选当场丢弃，不占任何名额）；调大 = 一次看到更多经验。默认 {d}，可填 {min}–{max}',
+      fieldInjectMinScoreIdfRatio: '绝对相关度门槛（× IDF_MAX）',
+      fieldInjectMinScoreIdfRatioDesc: '低于这个分数的条目一条都不注入 —— 手册里没有相关经验时宁可注入 0 条，也不硬凑条数。IDF_MAX 随手册条目数自动变大，手册越长门槛越严。填 0 = 关掉绝对门槛（退回旧行为）。默认 {d}，可填 {min}–{max}',
+      fieldInjectMinRelativeToTop: '相对相关度门槛（× 本轮第一名）',
+      fieldInjectMinRelativeToTopDesc: '每条候选至少要到本轮最高分的这么多倍才注入，避免「蹭」着第一名混进来。填 0 = 关掉相对门槛。默认 {d}，可填 {min}–{max}',
       fieldAutoRecap: '自动归档经验',
       fieldAutoRecapDesc: '回合真正结束时由插件后台复盘并写入手册，不依赖模型主动调用',
       fieldAutoRecapThreshold: '自动归档触发门槛',
@@ -203,6 +224,18 @@ window.__ModuleLoader__.load({
       pickClear: 'Follow session model (clear)',
       catalogLoading: 'Loading the model catalog…',
       catalogFailed: 'Could not load the model catalog: the host may not have restarted yet (other fields still work)',
+      fieldReasoningEffort: 'Reasoning effort',
+      fieldReasoningEffortDesc: 'Pin the reasoning effort for Reflector/Curator; empty = follow the automatic downgrade (levels come from the session model, and are re-read whenever provider/model changes)',
+      pickEffortPlaceholder: 'Follow automatic (unset)',
+      pickEffortClear: 'Unset (follow the automatic downgrade)',
+      pickEffortSearch: 'Search effort levels…',
+      pickNoMatchEffort: 'No matching effort level',
+      effortsFailed: 'This model declares no reasoning effort levels',
+      effortsAutoNow: 'Currently using automatically: {name}',
+      effortsNoneFallback: 'This model exposes no reasoning effort levels; nothing else is affected.',
+      effortsStaleCleared: 'The effort level you picked is not declared by the new model; it has been cleared to “unset”.',
+      fieldAutoReasoningDowngrade: 'Auto-downgrade to the lowest reasoning effort',
+      fieldAutoReasoningDowngradeDesc: 'At the start of a turn, drop the reasoning effort to the lowest level the model supports to save reasoning budget; off = follow the manual effort only',
       warnPair: 'The override only applies when both provider and model are set; with just one set it silently falls back to the session model.',
       fieldMaxEntries: 'Playbook capacity',
       fieldMaxEntriesDesc: 'Once full, the plugin first asks the LLM to merge two similar entries into one; if still over the cap it evicts the least-hit entries (moved to archive.md beside the playbook, never deleted) (default {d}, {min}–{max})',
@@ -212,6 +245,10 @@ window.__ModuleLoader__.load({
       fieldInjectTokenBudgetDesc: 'Token estimate cap for the per-turn injected block (ASCII ×0.4 + CJK ×1.0). Smaller = inject less content and spend fewer tokens and less context (entries over budget are simply not injected); larger = inject more. Default {d}, {min}–{max}',
       fieldInjectMaxEntries: 'Max entries per injection',
       fieldInjectMaxEntriesDesc: 'How many experience entries at most are injected per turn. Smaller = less injected, fewer tokens (candidates beyond the cap are dropped for that turn and take up no quota); larger = see more experience at once. Default {d}, {min}–{max}',
+      fieldInjectMinScoreIdfRatio: 'Absolute relevance floor (× IDF_MAX)',
+      fieldInjectMinScoreIdfRatioDesc: 'Entries scoring below this are not injected at all: when the playbook holds nothing relevant it injects 0 entries instead of padding the count. IDF_MAX grows with the number of entries, so longer playbooks have a stricter floor. 0 disables the absolute floor (old behaviour). Default {d}, {min}–{max}',
+      fieldInjectMinRelativeToTop: 'Relative relevance floor (× this turn top score)',
+      fieldInjectMinRelativeToTopDesc: 'Every candidate must reach at least this fraction of the top score for the turn, so weak hits cannot ride along with the best match. 0 disables the relative floor. Default {d}, {min}–{max}',
       fieldAutoRecap: 'Archive experience automatically',
       fieldAutoRecapDesc: 'Reflect and write into the playbook in the background once a turn truly ends, without relying on the model calling it',
       fieldAutoRecapThreshold: 'Auto-archive trigger threshold',
@@ -371,6 +408,9 @@ window.__ModuleLoader__.load({
       '.ace-pick-foot{border-top:1px solid #263140;padding-top:6px}',
       '.ace-pick-clear{color:#9fb2c5}',
       '.ace-set-warn{font-size:11px;line-height:1.6;color:#f0b429;padding:0 0 10px}',
+      '.ace-set-effort-note{font-size:11px;line-height:1.6;color:#9fb2c5;padding:0 0 10px}',
+      '.ace-pick-trigger:disabled{color:#55677a;border-color:#1f2a36;cursor:not-allowed}',
+      '.ace-pick-trigger:disabled:hover{border-color:#1f2a36}',
       // —— 待合并复审区块 ——
       '.ace-inbox{padding:4px 0 6px;border-top:1px solid #1a2430}',
       '.ace-inbox-title{font-size:13px;font-weight:600;color:#eaf2fb;margin:12px 0 2px}',
@@ -554,10 +594,13 @@ window.__ModuleLoader__.load({
      *   placeholder        空值占位文案
      *   searchPlaceholder  搜索框 placeholder
      *   noMatchText        无匹配时的提示
-     *   clearText          「跟随会话模型（清空）」项文案
+     *   clearText          底部清空项文案（provider/model 是「跟随会话模型（清空）」，
+     *                      思考档位是「不指定（跟随自动降档）」）
+     *   displayValue       触发器上显示的文字（缺省显示 value；档位要显示 name 而不是 id）
      *   errorText          目录读取失败时的错误行（有则不画列表）
      *   loading            目录读取中的提示
      *   onPick(item) / onClear()
+     *   disabled           下拉禁用（档位列表读不到 / 该模型没声明档位时用，此时仍显示占位与说明）
      *   ariaLabel          可访问名（由 FieldRow 的 label 传下来：读屏听得出是哪一项设置）
      *   pickerId           触发按钮的 id（FieldRow 的 htmlFor 指向它，建立 label 关联）
      *   labelId            FieldRow 的 label id（按钮用 aria-labelledby 再兜一层）
@@ -565,7 +608,7 @@ window.__ModuleLoader__.load({
     function ModelPicker(props) {
       const {
         value, groups, placeholder, searchPlaceholder, noMatchText, clearText, errorText, loading,
-        onPick, onClear, ariaLabel, pickerId, labelId,
+        onPick, onClear, ariaLabel, pickerId, labelId, disabled, displayValue,
       } = props;
       const [open, setOpen] = React.useState(false);
       const [query, setQuery] = React.useState('');
@@ -628,6 +671,7 @@ window.__ModuleLoader__.load({
       };
 
       const onKeyDown = (event) => {
+        if (disabled === true) return;
         if (event.key === 'Escape') {
           if (open) { event.preventDefault(); setOpen(false); }
           return;
@@ -659,9 +703,11 @@ window.__ModuleLoader__.load({
           'aria-expanded': open ? 'true' : 'false',
           'aria-label': ariaLabel || undefined,
           'aria-labelledby': labelId || undefined,
-          onClick: () => setOpen((wasOpen) => !wasOpen),
+          disabled: disabled === true,
+          onClick: () => { if (disabled !== true) setOpen((wasOpen) => !wasOpen); },
         },
-          h('span', { className: 'ace-pick-value' + (value ? '' : ' is-empty') }, value || placeholder),
+          h('span', { className: 'ace-pick-value' + (value ? '' : ' is-empty') },
+            value ? (displayValue || value) : placeholder),
           h('span', { className: 'ace-pick-caret' }, '▾')),
         open ? h('div', { className: 'ace-pick-panel' },
           h('input', {
@@ -1003,6 +1049,10 @@ window.__ModuleLoader__.load({
       const [sortKey, setSortKey] = React.useState('updated');
       const [sortDir, setSortDir] = React.useState('desc');
       const [page, setPage] = React.useState(1);
+      // 归档分区**独立**的页码：与活跃分区的 page 互不影响。
+      // 共用一个页码会让「在活跃分区翻到第 2 页，切到归档分区也停在第 2 页」，
+      // 而两个分区的条目数毫无关系，那个页码大概率是个不存在的页。
+      const [archivedPage, setArchivedPage] = React.useState(1);
       const [open, setOpen] = React.useState({});
       const [reloadToken, setReloadToken] = React.useState(0);
       const handled = React.useRef(-1);
@@ -1095,7 +1145,8 @@ window.__ModuleLoader__.load({
         className: 'ace-entries-scope-btn' + (scope === id ? ' is-active' : ''),
         'aria-pressed': scope === id ? 'true' : 'false',
         // 切分区也复位确认态：切走之后那条可能已不在视野里，留着悬空确认态会误删。
-        onClick: () => { setScope(id); setPendingArchive(null); },
+        // 切分区复位的理由：切走再回来停在上一次的第 N 页，会让人以为条目丢了。
+        onClick: () => { setScope(id); setPendingArchive(null); setArchivedPage(1); },
       }, label);
       const scopeSwitch = h('div', { className: 'ace-entries-scope', role: 'group', 'aria-label': t('entriesTitle') },
         scopeButton('active', t('entriesScopeActive')),
@@ -1197,10 +1248,20 @@ window.__ModuleLoader__.load({
       };
 
       const archivedView = () => {
+        // 归档分区也按 20 条/页分页（与活跃分区同一个页长），但页码用的是**独立**的 archivedPage，
+        // 两个分区的页码互不影响。归档是只读历史、条数只增不减，全量铺开没有上限。
+        const archivedPageCount = Math.max(1, Math.ceil(archivedAll.length / ENTRIES_PAGE_SIZE));
+        // 钳位：刷新后归档条目变少时，绝不留在不存在的页码上（越界的 page 只影响本帧渲染，不回写 state）。
+        const archivedCurrentPage = Math.min(Math.max(archivedPage, 1), archivedPageCount);
+        const archivedRows = archivedAll.slice(
+          (archivedCurrentPage - 1) * ENTRIES_PAGE_SIZE,
+          archivedCurrentPage * ENTRIES_PAGE_SIZE,
+        );
+
         const archivedList = archivedAll.length === 0
           ? h('div', { className: 'ace-archived-note' }, t('entriesArchivedEmpty'))
           : h('ul', { className: 'ace-archived-list' },
-            archivedAll.map((entry) => {
+            archivedRows.map((entry) => {
               const id = String(entry?.id ?? '');
               const isOpen = archivedOpen[id] === true;
               const archive = entry?.archive && typeof entry.archive === 'object' ? entry.archive : {};
@@ -1232,11 +1293,45 @@ window.__ModuleLoader__.load({
                     archivedDetailBlock('entriesRationale', entry?.rationale, 'entriesRationaleEmpty'))
                   : null);
             }));
+
+        // 归档分页条：类名与文案（entriesPrev / entriesPage / entriesNext）全部复用活跃分区那一套，
+        // 样式在 client.js 的 .ace-entries-pager 系列里已经存在，因此自动继承本页固定的 VCP 暗色与字体。
+        // 只放上一页 / 下一页 / 数字页码三种按钮 —— 归档只读，这一区绝不能出现删除或还原入口。
+        const archivedPageButtons = [];
+        for (let i = 1; i <= archivedPageCount; i += 1) {
+          archivedPageButtons.push(h('button', {
+            key: 'archived-page:' + i,
+            type: 'button',
+            className: 'ace-entries-pager-btn' + (i === archivedCurrentPage ? ' is-active' : ''),
+            'aria-current': i === archivedCurrentPage ? 'page' : 'false',
+            onClick: () => setArchivedPage(i),
+          }, String(i)));
+        }
+
+        const archivedPager = h('div', { className: 'ace-entries-pager' },
+          h('button', {
+            type: 'button',
+            className: 'ace-entries-pager-btn',
+            disabled: archivedCurrentPage <= 1,
+            onClick: () => setArchivedPage(archivedCurrentPage - 1),
+          }, t('entriesPrev')),
+          archivedPageButtons,
+          h('span', { className: 'ace-entries-pager-text' },
+            fmt(t('entriesPage'), { x: archivedCurrentPage, y: archivedPageCount })),
+          h('button', {
+            type: 'button',
+            className: 'ace-entries-pager-btn',
+            disabled: archivedCurrentPage >= archivedPageCount,
+            onClick: () => setArchivedPage(archivedCurrentPage + 1),
+          }, t('entriesNext')));
+
+        // 显隐条件与活跃分区一致：空归档只给空态、不渲染分页条；非空就连只有 1 页也渲染。
         return h('div', { className: 'ace-entries' }, head, scopeSwitch,
           h('div', { className: 'ace-archived' },
             h('div', { className: 'ace-archived-count' },
               fmt(t('entriesArchivedCount'), { n: data.archivedTotal })),
-            archivedList));
+            archivedList,
+            archivedAll.length === 0 ? null : archivedPager));
       };
 
       if (scope === 'archived') return archivedView();
@@ -1366,6 +1461,12 @@ window.__ModuleLoader__.load({
       // failed 只影响两个下拉（面板里显示错误行），其余字段照常可用——
       // 宿主还没重启时 /catalog 会 404，这是正常状态。
       const [catalog, setCatalog] = React.useState({ status: 'loading', providers: [] });
+      // 思考档位：state 取 'loading' | 'ready' | 'failed'，items 是该模型声明的档位，
+      // effective 是后端算出来的「自动模式现在会用什么」。失败只让这一行降级成一行说明，
+      // 其余字段与其余页面照常可用 —— 范式同上面的 catalog failed。
+      const [efforts, setEfforts] = React.useState({ state: 'loading', items: [], effective: null });
+      // 「手选档位在新模型里不存在、已被清空」的说明位（只影响一句提示，不影响任何值）。
+      const [effortCleared, setEffortCleared] = React.useState(false);
       // 待合并复审列表：status 取 'loading' | 'ready' | 'failed'。
       // failed（宿主还没重启时会 404）只让这一区块变成一行灰字，其余字段照常可用 ——
       // 范式同上面的 catalog failed，绝不能因此让整页报错。
@@ -1453,6 +1554,42 @@ window.__ModuleLoader__.load({
         return () => { alive = false; };
       }, []);
 
+      // —— 思考档位：provider/model 一改就重拉（旧档位列表对新模型没有意义）——
+      // 查询参数：两项都填了才带上（只填一项宿主不会用覆盖值，带上反而查错模型）；
+      // 都空 = 不带参数，后端用最近观察到的会话模型 —— 与 lib/llm.js:17-30 的 && 语义一致。
+      // 这里读已落盘的 state.value 而不是 value()：value() 是渲染期的 draft 兜底，hook 里拿不到。
+      const effortProvider = String(state.value?.reflectProvider ?? '');
+      const effortModel = String(state.value?.reflectModel ?? '');
+      const effortQuery = effortProvider !== '' && effortModel !== ''
+        ? '?provider=' + encodeURIComponent(effortProvider) + '&model=' + encodeURIComponent(effortModel)
+        : '';
+      React.useEffect(() => {
+        // 设置还没读回来时不发请求：那时 provider/model 都是 undefined，先带空参拉一次
+        // 再带真参拉一次等于白打一发（还会把「未声明档位」的中间态闪给用户看）。
+        if (state.status !== 'ready') return undefined;
+        let alive = true;
+        setEfforts({ state: 'loading', items: [], effective: null });
+        fetch(EFFORTS_ROUTE + effortQuery, { headers: { accept: 'application/json' } })
+          .then((response) => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+          })
+          .then((payload) => {
+            if (!alive) return;
+            if (!payload || payload.ok !== true || !Array.isArray(payload.efforts)) {
+              setEfforts({ state: 'failed', items: [], effective: null });
+              return;
+            }
+            const items = payload.efforts
+              .map((entry) => ({ id: String(entry?.id ?? ''), name: entry?.name || String(entry?.id ?? ''), description: entry?.description }))
+              // 只认后端钉死的七个档位名：别的值发不出去，进列表只会让用户选了报错。
+              .filter((entry) => EFFORT_LEVEL_IDS.includes(entry.id));
+            setEfforts({ state: 'ready', items, effective: payload.effective || null });
+          })
+          .catch(() => { if (alive) setEfforts({ state: 'failed', items: [], effective: null }); });
+        return () => { alive = false; };
+      }, [state.status, effortQuery]);
+
       // 打开页面拉一次；statsReload 变化时（点「刷新」按钮、设置保存成功后）再拉一次。
       React.useEffect(() => {
         let alive = true;
@@ -1501,6 +1638,20 @@ window.__ModuleLoader__.load({
         body[field] = value;
         send('POST', body, t('saved'));
       };
+
+      // 换模型后旧手选档位可能不再合法（新模型的声明列表里没有它）：清空成「不指定」并说一句。
+      // 只在「列表已就绪 + 值确实不在列表里」时提交一次，绝不每次进页面都白写一次配置。
+      const pinnedEffort = String(state.value?.reflectReasoningEffort ?? '');
+      React.useEffect(() => {
+        if (efforts.state !== 'ready') return;
+        if (pinnedEffort !== '' && (efforts.items || []).some((item) => item.id === pinnedEffort)) {
+          setEffortCleared(false);
+          return;
+        }
+        if (pinnedEffort === '') return;
+        setEffortCleared(true);
+        commit('reflectReasoningEffort', '');
+      }, [efforts.state, efforts.items, pinnedEffort]);
 
       if (state.status === 'loading') {
         return h('div', { className: 'ace-set' }, h('style', null, CSS), h('div', { className: 'ace-set-note' }, t('loading')));
@@ -1567,9 +1718,14 @@ window.__ModuleLoader__.load({
       const protectDaysRange = boundsOf('evictProtectDays', [0, 365]);
       const protectDaysDefault = boundsDefault('evictProtectDays', 14);
       const injectBudgetRange = boundsOf('injectTokenBudget', [100, 8000]);
-      const injectBudgetDefault = boundsDefault('injectTokenBudget', 900);
+      const injectBudgetDefault = boundsDefault('injectTokenBudget', 500);
       const injectCountRange = boundsOf('injectMaxEntries', [1, 20]);
       const injectCountDefault = boundsDefault('injectMaxEntries', 5);
+      // 第 50 轮两个门槛项：都允许小数（4.0 / 0.6 是实测档位，取整就改了方案参数）。
+      const minIdfRatioRange = boundsOf('injectMinScoreIdfRatio', [0, 20]);
+      const minIdfRatioDefault = boundsDefault('injectMinScoreIdfRatio', 4);
+      const minRelativeRange = boundsOf('injectMinRelativeToTop', [0, 1]);
+      const minRelativeDefault = boundsDefault('injectMinRelativeToTop', 0.6);
 
       const numProps = (field, min = 1, ph, max) => ({
         className: 'ace-set-input',
@@ -1592,6 +1748,29 @@ window.__ModuleLoader__.load({
         onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
       });
 
+      // 小数版数值输入：与 numProps 同一套写入路径，差别只有 step 与**不取整**
+      // （numProps 的 Math.floor 会把 0.6 压成 0 = 静默关掉门槛）。
+      const decimalProps = (field, min = 0, ph, max) => ({
+        className: 'ace-set-input',
+        type: 'number',
+        min,
+        max,
+        step: 0.1,
+        placeholder: ph || '',
+        value: String(value(field) == null ? '' : value(field)),
+        onChange: (e) => setDraftField(field, e.target.value),
+        onBlur: () => {
+          if (!Object.prototype.hasOwnProperty.call(draft, field)) return;
+          const raw = Number(draft[field]);
+          if (!Number.isFinite(raw)) return;
+          const upper = Number.isFinite(Number(max)) ? Number(max) : Number.POSITIVE_INFINITY;
+          const n = Math.min(upper, Math.max(min, raw));
+          if (n === Number(state.value[field])) return;
+          commit(field, n);
+        },
+        onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
+      });
+
       const fromStored = Object.keys(state.stored ?? {}).length > 0;
 
       // —— 两个下拉的数据与提交 ——
@@ -1599,6 +1778,50 @@ window.__ModuleLoader__.load({
       const catalogLoading = catalog.status === 'loading' ? t('catalogLoading') : undefined;
       const currentProvider = String(value('reflectProvider') || '');
       const currentModel = String(value('reflectModel') || '');
+
+      // —— 思考档位：拉取、候选、说明、提交 ——
+      // 后端只服务七个钉死的档位名；收到的 id 不在其中一律当「该模型未声明档位」（见 EFFORT_LEVEL_IDS）。
+      const levelName = (id) => {
+        const found = (efforts.items || []).find((item) => item.id === id);
+        return found ? (found.name || found.id || String(id)) : String(id ?? '');
+      };
+      // 候选是该模型声明的档位；「不指定（跟随自动）」由 ModelPicker 底部的清空项承担
+      // （clearText 已改成档位语境的文案），不再重复画一条同样的空值项。
+      const effortGroups = [{
+        key: 'efforts',
+        title: '',
+        items: (efforts.items || []).map((item) => ({
+          id: item.id,
+          name: item.name || item.id,
+          description: item.description,
+        })),
+      }];
+      const manualEffort = String(value('reflectReasoningEffort') || '');
+      // 手选值不在当前声明列表里 = 后端不认这一档（改选了不声明它的 model 就会这样）。
+      // 界面不许显示这个发不出去的值，选中态回落到「不指定」。
+      const staleEffort = manualEffort !== '' && (efforts.state === 'ready'
+        ? !(efforts.items || []).some((item) => item.id === manualEffort)
+        : false);
+      const effortValue = staleEffort ? '' : manualEffort;
+      const effortsLoading = efforts.state === 'loading' ? t('catalogLoading') : undefined;
+      // 说明行：手动档位 > 自动档位 > 后端给的原因 > 通用兜底。任何一格都只影响这一句文案，
+      // 绝不影响其它字段 —— 路由失败时这一行必须仍然可用。
+      const effortNote = (() => {
+        if (efforts.state === 'failed') return t('effortsFailed');
+        // 旧档位被新模型否掉：明确说出来，别让用户以为选择被默默吃了。
+        if (staleEffort || effortCleared) return t('effortsStaleCleared');
+        if (efforts.state === 'loading') return '';
+        // 模型声明了空列表：同样是「没有可用档位」，这一句必须说出来。
+        if ((efforts.items || []).length === 0) return t('effortsFailed');
+        const effective = efforts.effective;
+        // 手动档位在触发器上已经显示，说明行不再重复；只有自动/无档位两种情况需要解释。
+        if (manualEffort !== '') return '';
+        if (effective && effective.source === 'auto' && effective.effort) {
+          return fmt(t('effortsAutoNow'), { name: levelName(effective.effort) });
+        }
+        if (effective && effective.source === 'none') return String(effective.reason || t('effortsNoneFallback'));
+        return '';
+      })();
 
       const providerGroups = [{
         key: 'providers',
@@ -1756,6 +1979,41 @@ window.__ModuleLoader__.load({
           }),
           // 只填一项时的显式警告：两项恰好只有一个非空才出现（见 lib/llm.js:17-30 的 && 语义）。
           pairIncomplete ? h('div', { className: 'ace-set-warn' }, t('warnPair')) : null,
+          // 思考强度：复用 ModelPicker（provider / model 两行的同一套交互），候选由 /efforts 按模型给出。
+          // 失败或空列表时控件禁用、只显一行说明 —— 绝不让这一行拖垮整页。
+          h(FieldRow, {
+            label: t('fieldReasoningEffort'), desc: t('fieldReasoningEffortDesc'), controlId: 'ace-field-reasoningEffort',
+            control: h(ModelPicker, {
+              ariaLabel: t('fieldReasoningEffort'),
+              pickerId: 'ace-field-reasoningEffort',
+              labelId: 'ace-field-reasoningEffort-label',
+              value: effortValue,
+              // 触发器显示档位名（「高」「中」），值与提交语义仍是 id。
+              displayValue: effortValue ? levelName(effortValue) : undefined,
+              groups: effortGroups,
+              disabled: efforts.state === 'failed' || (efforts.state === 'ready' && (efforts.items || []).length === 0),
+              placeholder: t('pickEffortPlaceholder'),
+              searchPlaceholder: t('pickEffortSearch'),
+              noMatchText: t('pickNoMatchEffort'),
+              clearText: t('pickEffortClear'),
+              errorText: efforts.state === 'failed' ? t('effortsFailed') : undefined,
+              loading: effortsLoading,
+              onPick: (item) => commit('reflectReasoningEffort', String(item?.id ?? '')),
+              onClear: () => commit('reflectReasoningEffort', ''),
+            }),
+          }),
+          effortNote ? h('div', { className: 'ace-set-effort-note' }, effortNote) : null,
+          // 自动降到最低思考档：照 autoReflect 那一行的写法，值只来自 /settings 的 value。
+          h(FieldRow, {
+            label: t('fieldAutoReasoningDowngrade'), desc: t('fieldAutoReasoningDowngradeDesc'), controlId: 'ace-field-autoReasoningDowngrade',
+            control: h(Switch, {
+              id: 'ace-field-autoReasoningDowngrade',
+              label: t('fieldAutoReasoningDowngrade'),
+              checked: state.value.autoReasoningDowngrade !== false,
+              onChange: (next) => commit('autoReasoningDowngrade', next),
+              onText: t('on'), offText: t('off'),
+            }),
+          }),
           // min/max 与文案里的数字全部取自 payload.bounds（服务端 describe() 的唯一边界出处）。
           h(FieldRow, {
             label: t('fieldMaxEntries'),
@@ -1782,6 +2040,19 @@ window.__ModuleLoader__.load({
             desc: fmt(t('fieldInjectMaxEntriesDesc'), { min: injectCountRange[0], max: injectCountRange[1], d: injectCountDefault }),
             controlId: 'ace-field-injectMaxEntries',
             control: h('input', { ...numProps('injectMaxEntries', injectCountRange[0], String(injectCountDefault), injectCountRange[1]), id: 'ace-field-injectMaxEntries' }),
+          }),
+          // 第 50 轮两个门槛项：小数输入（step 0.1），写入路径与其它字段完全一致。
+          h(FieldRow, {
+            label: t('fieldInjectMinScoreIdfRatio'),
+            desc: fmt(t('fieldInjectMinScoreIdfRatioDesc'), { min: minIdfRatioRange[0], max: minIdfRatioRange[1], d: minIdfRatioDefault }),
+            controlId: 'ace-field-injectMinScoreIdfRatio',
+            control: h('input', { ...decimalProps('injectMinScoreIdfRatio', minIdfRatioRange[0], String(minIdfRatioDefault), minIdfRatioRange[1]), id: 'ace-field-injectMinScoreIdfRatio' }),
+          }),
+          h(FieldRow, {
+            label: t('fieldInjectMinRelativeToTop'),
+            desc: fmt(t('fieldInjectMinRelativeToTopDesc'), { min: minRelativeRange[0], max: minRelativeRange[1], d: minRelativeDefault }),
+            controlId: 'ace-field-injectMinRelativeToTop',
+            control: h('input', { ...decimalProps('injectMinRelativeToTop', minRelativeRange[0], String(minRelativeDefault), minRelativeRange[1]), id: 'ace-field-injectMinRelativeToTop' }),
           }),
           h(FieldRow, {
             label: t('fieldAutoRecap'), desc: t('fieldAutoRecapDesc'), controlId: 'ace-field-autoRecap',

@@ -13,8 +13,9 @@ import { createRecapQueue, RECAP_TOTAL_DEADLINE_MS, MAX_QUEUED_RECAPS } from '..
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('第39轮 队列｜常量取值落在用户批准的区间内', () => {
-  assert.ok(RECAP_TOTAL_DEADLINE_MS >= 90000 && RECAP_TOTAL_DEADLINE_MS <= 180000, '总时限越界：' + RECAP_TOTAL_DEADLINE_MS);
-  assert.equal(RECAP_TOTAL_DEADLINE_MS, 120000, '本取值应固定为 120000（理由见 DESIGN.md 第 39 轮）');
+  // 第 49 轮：120000 → 300000（须 ≥ 2 × 单次上限 150000，理由见 DESIGN.md 第 39 轮与该轮补充）。
+  assert.ok(RECAP_TOTAL_DEADLINE_MS >= 240000 && RECAP_TOTAL_DEADLINE_MS <= 400000, '总时限越界：' + RECAP_TOTAL_DEADLINE_MS);
+  assert.equal(RECAP_TOTAL_DEADLINE_MS, 300000, '本取值应固定为 300000（理由见 DESIGN.md 第 39 轮）');
   assert.ok(MAX_QUEUED_RECAPS >= 1 && MAX_QUEUED_RECAPS <= 2, '队列上限越界：' + MAX_QUEUED_RECAPS);
 });
 

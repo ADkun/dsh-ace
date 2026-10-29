@@ -858,13 +858,32 @@ test('R45 复盘预算｜预算充足：每次调用都带 maxMs，且不满额�
   await cleanup(dir);
 });
 
-test('R45 复盘预算｜满额手册（>= maxEntries）：Reflector 的调用预算要扣出合并预留 ' + 40000 + 'ms', async () => {
-  const dir = await makeDir('budget-full-reserve');
+test('R45 复盘预算｜满额但无 ≥阈值的配对：不预留合并时间（C2），maxMs ≈ 剩余 − 落盘保底', async () => {
+  const dir = await makeDir('budget-full-nopair');
   const file = path.join(dir, 'playbook.md');
   await writePlaybook(file, [E('ace-001', '编辑前先读', '先 read 再动手')]);
   const calls = [];
   const { deps, agent } = makeDeps(file, {
-    maxEntries: 1, // 满额：1 条 >= 1 条 → 合并阶段几乎必跑
+    maxEntries: 1, // 满额：1 条 >= 1 条，但只有一条 → 没有可配对 → 不预留
+    reflectRound: async ({ round, maxMs }) => { calls.push({ round, maxMs }); return []; },
+  });
+  await runRecapPipeline(deps, { agent, summary: '轨迹', deadlineAt: Date.now() + 120000 });
+  assert.equal(calls.length, 1, JSON.stringify(calls));
+  assert.ok(calls[0].maxMs >= 100000 && calls[0].maxMs <= 112000,
+    '无配对 → 不扣合并预留，maxMs ≈ 120s − 落盘保底 8s：' + calls[0].maxMs);
+  await cleanup(dir);
+});
+
+test('R45 复盘预算｜满额且有 ≥阈值的配对：Reflector 调用预算扣出合并预留 ' + 40000 + 'ms（C2）', async () => {
+  const dir = await makeDir('budget-full-pair');
+  const file = path.join(dir, 'playbook.md');
+  await writePlaybook(file, [
+    E('ace-001', '批量改名前先列调用点', '先用 grep 列出全部调用点再改'),
+    E('ace-002', '批量改名前先列调用点', '先用 grep 列出全部调用点再改'),
+  ]);
+  const calls = [];
+  const { deps, agent } = makeDeps(file, {
+    maxEntries: 1, // 两条高度相似 >= 阈值 → 有配对，必须预留合并时间
     reflectRound: async ({ round, maxMs }) => { calls.push({ round, maxMs }); return []; },
   });
   await runRecapPipeline(deps, { agent, summary: '轨迹', deadlineAt: Date.now() + 120000 });

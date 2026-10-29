@@ -398,9 +398,11 @@ test('P0-7｜lib/index.js 真 import 成功，导出入口契约 { name, inject,
   assert.equal(typeof plugin.apply, 'function');
   assert.equal(typeof plugin.Config, 'object');
   assert.equal(plugin.Config.type, 'object');
-  // 第 36 轮加了三个可调项（evictProtectDays / injectTokenBudget / injectMaxEntries）→ 9 + 3 = 12。
-  assert.equal(Object.keys(plugin.Config.fields).length, 12, 'Config 十二个字段');
-  for (const key of ['playbookPath', 'autoReflect', 'reflectProvider', 'reflectModel', 'maxEntries', 'evictProtectDays', 'injectTokenBudget', 'injectMaxEntries', 'autoRecap', 'autoRecapThreshold', 'autoRecapCooldownTurns', 'autoReviewInbox']) {
+  // 第 36 轮加了三个可调项（evictProtectDays / injectTokenBudget / injectMaxEntries）→ 9 + 3 = 12；
+  // 第 49 轮又加两个注入门槛项（injectMinScoreIdfRatio / injectMinRelativeToTop）→ 14。
+  // 第 50 轮加思考档位两项（reflectReasoningEffort / autoReasoningDowngrade）→ 16。
+  assert.equal(Object.keys(plugin.Config.fields).length, 16, 'Config 十六个字段');
+  for (const key of ['playbookPath', 'autoReflect', 'reflectProvider', 'reflectModel', 'maxEntries', 'evictProtectDays', 'injectTokenBudget', 'injectMaxEntries', 'injectMinScoreIdfRatio', 'injectMinRelativeToTop', 'autoRecap', 'autoRecapThreshold', 'autoRecapCooldownTurns', 'autoReviewInbox', 'reflectReasoningEffort', 'autoReasoningDowngrade']) {
     assert.ok(plugin.Config.fields[key], 'Config 缺字段 ' + key);
   }
 });

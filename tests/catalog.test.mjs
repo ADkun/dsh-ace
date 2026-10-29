@@ -111,3 +111,36 @@ test('P2-5｜超时不 abort 上游（宿主 listModels 没有 signal）：上�
     process.off('unhandledRejection', onUnhandled);
   }
 });
+
+test('D1｜buildCatalog 短 TTL 缓存：同一 llm 实例重复调用不再打网络；返回深拷贝；cacheTtlMs=0 关闭', async () => {
+  let modelCalls = 0;
+  const llm = {
+    listProviders: () => [{ id: 'p', name: 'P' }],
+    async listModels() { modelCalls += 1; return [{ provider: 'p', id: 'm', name: 'M' }]; },
+  };
+  const a = await buildCatalog(llm, { timeoutMs: 50 });
+  const b = await buildCatalog(llm, { timeoutMs: 50 });
+  assert.equal(a.ok, true);
+  assert.deepEqual(a, b, '命中缓存返回同一形状');
+  assert.equal(modelCalls, 1, 'TTL 内第二次不再打网络');
+  b.providers[0].models[0].name = '改了';
+  const c = await buildCatalog(llm, { timeoutMs: 50 });
+  assert.equal(c.providers[0].models[0].name, 'M', '缓存不被调用方改坏（深拷贝）');
+  const before = modelCalls;
+  await buildCatalog(llm, { timeoutMs: 50, cacheTtlMs: 0 });
+  await buildCatalog(llm, { timeoutMs: 50, cacheTtlMs: 0 });
+  assert.equal(modelCalls, before + 2, 'cacheTtlMs=0 关闭缓存，每次都打网络');
+});
+
+test('D1｜buildCatalog 失败不缓存：provider 带 error 的结果不进缓存，下次重试', async () => {
+  let calls = 0;
+  const llm = {
+    listProviders: () => [{ id: 'p', name: 'P' }],
+    async listModels() { calls += 1; throw new Error('boom'); },
+  };
+  const a = await buildCatalog(llm, { timeoutMs: 50 });
+  const b = await buildCatalog(llm, { timeoutMs: 50 });
+  assert.equal(calls, 2, '失败结果不缓存，每次都重试');
+  assert.match(a.providers[0].error, /boom/);
+  assert.match(b.providers[0].error, /boom/);
+});

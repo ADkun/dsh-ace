@@ -95,26 +95,29 @@ const get = () => callRoute(route, 'GET', '/api/dsh-ace/settings');
 const put = (body) => callRoute(route, 'POST', '/api/dsh-ace/settings', body);
 
 const THREE = ['evictProtectDays', 'injectTokenBudget', 'injectMaxEntries'];
-const DEFAULTS = { evictProtectDays: 14, injectTokenBudget: 900, injectMaxEntries: 5 };
-const RANGES = { evictProtectDays: [0, 365], injectTokenBudget: [100, 8000], injectMaxEntries: [1, 20] };
+// 第 50 轮加了两个注入门槛项（允许小数）：4.0 / 0.6 是实测档位，取整就改了方案参数。
+const FIVE = [...THREE, 'injectMinScoreIdfRatio', 'injectMinRelativeToTop'];
+const DEFAULTS = { evictProtectDays: 14, injectTokenBudget: 500, injectMaxEntries: 5, injectMinScoreIdfRatio: 4, injectMinRelativeToTop: 0.6 };
+const RANGES = { evictProtectDays: [0, 365], injectTokenBudget: [100, 8000], injectMaxEntries: [1, 20], injectMinScoreIdfRatio: [0, 20], injectMinRelativeToTop: [0, 1] };
 
 test.after(() => {
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
 });
 
-test('配置①：Config 声明了三个新字段（共 12 个），默认值 14 / 900 / 5', () => {
+test('配置①：Config 声明了五个可调字段（共 16 个），默认值 14 / 500 / 5 / 4 / 0.6', () => {
   const keys = Object.keys(plugin.Config.fields);
-  assert.equal(keys.length, 12, 'Config 必须是 12 个字段：' + keys.join(','));
-  for (const key of THREE) assert.equal(keys.includes(key), true, '缺字段 ' + key);
-  for (const key of THREE) {
+  // 第 50 轮：加了 reflectReasoningEffort / autoReasoningDowngrade 两个思考档位键 → 16。
+  assert.equal(keys.length, 16, 'Config 必须是 16 个字段：' + keys.join(','));
+  for (const key of FIVE) assert.equal(keys.includes(key), true, '缺字段 ' + key);
+  for (const key of FIVE) {
     assert.equal(plugin.Config.fields[key].defaultValue, DEFAULTS[key], key + ' 的默认值不对');
   }
 });
 
-test('配置①：GET 返回三个新键的 value / bounds / defaults（设置页的唯一数字出处）', async () => {
+test('配置①：GET 返回五个键的 value / bounds / defaults（设置页的唯一数字出处）', async () => {
   const res = await get();
   assert.equal(res.status, 200);
-  for (const key of THREE) {
+  for (const key of FIVE) {
     assert.equal(res.body.value[key], DEFAULTS[key], 'value.' + key);
     assert.equal(res.body.configured[key], DEFAULTS[key], 'configured.' + key);
     assert.deepEqual(res.body.bounds[key], RANGES[key], 'bounds.' + key);
@@ -141,6 +144,16 @@ test('配置②：PUT 三个键各写一次，value 与 stored 都跟着变（�
   assert.equal(res.body.value.injectMaxEntries, 8);
   assert.equal(res.body.value.injectTokenBudget, 1500);
 
+  // 两个门槛项是小数：4.5 / 0.7 必须原样落盘，绝不被取整（取整就改了方案参数）。
+  res = await put({ injectMinScoreIdfRatio: 4.5 });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.value.injectMinScoreIdfRatio, 4.5, '小数不许被取整');
+
+  res = await put({ injectMinRelativeToTop: 0.7 });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.value.injectMinRelativeToTop, 0.7, '小数不许被取整');
+  assert.equal(res.body.value.injectMinScoreIdfRatio, 4.5, '前面写的键不许被这一发打回默认');
+
   // 重新 GET：值来自 stored（重启后也还在）。
   const again = await get();
   assert.equal(again.body.value.evictProtectDays, 30);
@@ -151,6 +164,8 @@ test('配置②：PUT 三个键各写一次，value 与 stored 都跟着变（�
   assert.equal(RAW.evictProtectDays, 30, 'stored 的 JSON 里必须有新键');
   assert.equal(RAW.injectTokenBudget, 1500);
   assert.equal(RAW.injectMaxEntries, 8);
+  assert.equal(RAW.injectMinScoreIdfRatio, 4.5, '小数门槛同样要落盘');
+  assert.equal(RAW.injectMinRelativeToTop, 0.7);
 });
 
 test('配置③（0 是有效值）：evictProtectDays=0 必须被原样保存，绝不被 || 14 吞掉', async () => {
@@ -178,6 +193,11 @@ test('配置③：越界值一律 400，且报错文案说清范围（不许静�
     ['injectMaxEntries', 0, /1–20/],
     ['injectMaxEntries', 21, /1–20/],
     ['injectMaxEntries', '很多', /1–20/],
+    ['injectMinScoreIdfRatio', -1, /0–20/],
+    ['injectMinScoreIdfRatio', 21, /0–20/],
+    ['injectMinScoreIdfRatio', '很大', /0–20/],
+    ['injectMinRelativeToTop', -0.1, /0–1/],
+    ['injectMinRelativeToTop', 1.1, /0–1/],
   ];
   for (const [key, value, pattern] of cases) {
     const before = (await get()).body.value[key];
@@ -188,8 +208,8 @@ test('配置③：越界值一律 400，且报错文案说清范围（不许静�
   }
 });
 
-test('配置③：三个键的边界值恰好放行（min/max 都是合法值）', async () => {
-  for (const key of THREE) {
+test('配置③：五个键的边界值恰好放行（min/max 都是合法值）', async () => {
+  for (const key of FIVE) {
     const [min, max] = RANGES[key];
     for (const value of [min, max]) {
       const res = await put({ [key]: value });
@@ -197,7 +217,7 @@ test('配置③：三个键的边界值恰好放行（min/max 都是合法值）
       assert.equal(res.body.value[key], value);
     }
   }
-  await put({ evictProtectDays: 14, injectTokenBudget: 900, injectMaxEntries: 5 });
+  await put({ evictProtectDays: 14, injectTokenBudget: 900, injectMaxEntries: 5, injectMinScoreIdfRatio: 4, injectMinRelativeToTop: 0.6 });
 });
 
 test('配置③：空 body 400 no settings provided；只带未知键同样 400（不许静默成功）', async () => {
@@ -235,12 +255,14 @@ test('配置④：读出坏值时的回落口径 —— 缺省键回落默认值
   };
 
   // 手改过的设置文件（模拟旧版本 / 手改 JSON）：null 与空白串视为没填 → 默认值兜底；7 是合法值。
-  fs.writeFileSync(file, JSON.stringify({ evictProtectDays: null, injectTokenBudget: '  ', injectMaxEntries: 7 }), 'utf8');
+  fs.writeFileSync(file, JSON.stringify({ evictProtectDays: null, injectTokenBudget: '  ', injectMaxEntries: 7, injectMinScoreIdfRatio: null, injectMinRelativeToTop: '  ' }), 'utf8');
   let fresh = remount();
   let body = (await callRoute(fresh.handler, 'GET', '/api/dsh-ace/settings')).body;
   assert.equal(body.value.evictProtectDays, DEFAULTS.evictProtectDays, 'null 视为没填 → 回落默认 14（绝不许当成「显式 0」）');
-  assert.equal(body.value.injectTokenBudget, DEFAULTS.injectTokenBudget, '空白串视为没填 → 回落默认 900');
+  assert.equal(body.value.injectTokenBudget, DEFAULTS.injectTokenBudget, '空白串视为没填 → 回落默认 500');
   assert.equal(body.value.injectMaxEntries, 7, '合法值原样读回');
+  assert.equal(body.value.injectMinScoreIdfRatio, DEFAULTS.injectMinScoreIdfRatio, 'null 视为没填 → 回落默认 4');
+  assert.equal(body.value.injectMinRelativeToTop, DEFAULTS.injectMinRelativeToTop, '空白串视为没填 → 回落默认 0.6');
   assert.equal(body.stored.evictProtectDays, undefined, '没填的键不许凭空出现在 stored 里');
 
   // 显式 0 是有效值（= 不保护），读设置文件时也必须原样留下。
@@ -251,7 +273,7 @@ test('配置④：读出坏值时的回落口径 —— 缺省键回落默认值
   assert.equal(body.stored.evictProtectDays, 0);
 
   // 越界值读入时丢弃 + warn，绝不带着坏值跑。
-  fs.writeFileSync(file, JSON.stringify({ evictProtectDays: 999, injectTokenBudget: -1, injectMaxEntries: 0 }), 'utf8');
+  fs.writeFileSync(file, JSON.stringify({ evictProtectDays: 999, injectTokenBudget: -1, injectMaxEntries: 0, injectMinScoreIdfRatio: 25, injectMinRelativeToTop: 2 }), 'utf8');
   fresh = remount();
   body = (await callRoute(fresh.handler, 'GET', '/api/dsh-ace/settings')).body;
   assert.equal(body.value.evictProtectDays, DEFAULTS.evictProtectDays);
@@ -260,4 +282,6 @@ test('配置④：读出坏值时的回落口径 —— 缺省键回落默认值
   assert.ok(fresh.warns.includes('evictProtectDays'), '非法值要 warn：' + fresh.warns);
   assert.ok(fresh.warns.includes('injectTokenBudget'));
   assert.ok(fresh.warns.includes('injectMaxEntries'));
+  assert.ok(fresh.warns.includes('injectMinScoreIdfRatio'), '小数门槛的越界值同样要 warn：' + fresh.warns);
+  assert.ok(fresh.warns.includes('injectMinRelativeToTop'));
 });

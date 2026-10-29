@@ -229,6 +229,10 @@ function makeHost(options = {}) {
     if (url === '/api/dsh-ace/catalog') return json(200, { ok: true, providers: CATALOG });
     if (url === '/api/dsh-ace/stats') return json(200, statsPayload(options.stats));
     if (url === '/api/dsh-ace/inbox') return json(200, { ok: true, items: [], full: false, cap: 20 });
+    // 思考档位（第 50 轮）：本文件不测它，只给一份最小成功返回，免得假宿主对未知路由抛错。
+    if (String(url).startsWith('/api/dsh-ace/efforts')) {
+      return json(200, { ok: true, efforts: [{ id: 'off', name: '关' }], effective: { effort: null, source: 'none', reason: '不降档' } });
+    }
     if (url === '/api/dsh-ace/entries') {
       if (typeof entries === 'function') return entries(calls.length);
       if (entries instanceof Error) throw entries;
@@ -1407,5 +1411,164 @@ test('归档分区：只读 —— 不渲染归档按钮，也没有任何写入
       false, '归档分区不许出现「归档 / 确认」按钮：' + text);
   }
   assert.equal(archiveCalls(host).length, 0, '浏览归档分区不发任何写请求');
+});
+
+
+// —— 11. 已归档分区分页（第 53 轮）——
+// 归档分区也按 20 条/页分页，但页码是**独立**的 archivedPage，与活跃分区的 page 互不影响。
+// 分页条复用活跃分区那套类名与文案（entriesPrev / entriesPage / entriesNext），
+// 只放「上一页 / 下一页 / 数字页码」三种按钮 —— 归档只读，这一区不许出现任何删除或还原入口。
+const makeArchived = (n) => {
+  const list = [];
+  for (let i = 1; i <= n; i += 1) {
+    list.push(archivedEntry({
+      id: 'ace-' + String(100 + i),
+      title: '归档' + i,
+      archive: { reason: 'evicted', date: '2026-10-' + String((i % 28) + 1).padStart(2, '0') },
+    }));
+  }
+  return list;
+};
+const archivedPayload = (n) => entriesPayload([], { archived: makeArchived(n), archivedTotal: n });
+const archivedPrev = () => pagerButtons().find((node) => textOf(node) === DICTS.zh.entriesPrev);
+const archivedNext = () => pagerButtons().find((node) => textOf(node) === DICTS.zh.entriesNext);
+const pageTextFor = (x, y) => DICTS.zh.entriesPage.replace('{x}', String(x)).replace('{y}', String(y));
+
+test('已归档分区：45 条按每页 20 条分 3 页，首页禁上页、末页禁下页，点页码回第 1 页', async () => {
+  const host = makeHost({ entries: archivedPayload(45) });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+
+  assert.equal(archivedRows().length, 20, '归档分区每页 20 条');
+  assert.equal(pagerText(), pageTextFor(1, 3), '第 1 / 3 页');
+  assert.equal(archivedPrev().props.disabled, true, '首页禁用上页');
+  assert.equal(archivedNext().props.disabled, false, '首页可用下页');
+
+  await click(archivedNext());
+  assert.equal(archivedRows().length, 20, '第 2 页 20 条');
+  assert.equal(pagerText(), pageTextFor(2, 3));
+  assert.equal(archivedPrev().props.disabled, false, '第 2 页可用上页');
+  assert.equal(archivedNext().props.disabled, false, '第 2 页可用下页');
+  assert.match(textOf(archivedRows()[0]), /ace-121/, '第 2 页从第 21 条归档开始');
+
+  await click(archivedNext());
+  assert.equal(archivedRows().length, 5, '最后一页只剩 5 条');
+  assert.equal(pagerText(), pageTextFor(3, 3));
+  assert.equal(archivedNext().props.disabled, true, '末页禁用下页');
+
+  await click(pagerButtons().find((node) => textOf(node) === '1'));
+  assert.equal(pagerText(), pageTextFor(1, 3), '点页码「1」回到第 1 页');
+  assert.equal(archivedRows().length, 20);
+});
+
+test('已归档分区：归档页码与活跃页码互相独立，切分区从第 1 页看起', async () => {
+  const entries = [];
+  for (let i = 1; i <= 45; i += 1) {
+    entries.push(entry({ id: 'ace-' + String(i).padStart(3, '0'), title: '条目' + i, updated: '2026-09-' + String((i % 28) + 1).padStart(2, '0') }));
+  }
+  const host = makeHost({ entries: entriesPayload(entries, { archived: makeArchived(45), archivedTotal: 45 }) });
+  await mount(host);
+  await gotoEntries();
+
+  // 活跃分区翻到第 2 页 —— 归档分区不许跟着停在第 2 页。
+  await click(pagerButtons().find((node) => textOf(node) === DICTS.zh.entriesNext));
+  assert.equal(pagerText(), pageTextFor(2, 3), '活跃分区到第 2 页');
+
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  assert.equal(pagerText(), pageTextFor(1, 3), '切到归档分区从第 1 页看起（第 1 / 3 页）');
+  assert.equal(archivedRows().length, 20);
+
+  // 归档分区翻到第 2 页 —— 活跃分区也不许跟着动。
+  await click(archivedNext());
+  assert.equal(pagerText(), pageTextFor(2, 3), '归档分区到第 2 页');
+  await click(scopeButton(DICTS.zh.entriesScopeActive));
+  assert.equal(pagerText(), pageTextFor(2, 3), '活跃分区仍停在自己第 2 页（两个页码各自独立）');
+
+  // 再切回归档：切分区复位归档页码 —— 停在上一次的第 N 页会让人以为条目丢了。
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  assert.equal(pagerText(), pageTextFor(1, 3), '切走再回来回到第 1 页');
+  assert.equal(archivedRows().length, 20);
+});
+
+test('已归档分区：归档条目 ≤ 20 时只显示 1 页，上一页与下一页都禁用，页码按钮只有 1 个', async () => {
+  const host = makeHost({ entries: archivedPayload(20) });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+
+  assert.equal(archivedRows().length, 20, '一页装得下 20 条');
+  assert.equal(pagerText(), pageTextFor(1, 1), '第 1 / 1 页');
+  assert.equal(archivedPrev().props.disabled, true, '只有 1 页时上页禁用');
+  assert.equal(archivedNext().props.disabled, true, '只有 1 页时下页禁用');
+  assert.deepEqual(pagerButtons().map((node) => textOf(node)),
+    [DICTS.zh.entriesPrev, '1', DICTS.zh.entriesNext], '页码按钮只有 1 个');
+});
+
+test('已归档分区：归档为空时不渲染分页条，仍显示空态文案', async () => {
+  const host = makeHost({ entries: entriesPayload([], { archived: [], archivedTotal: 0 }) });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+
+  assert.equal(findAll(hasClass('ace-entries-pager')).length, 0, '空归档不渲染分页条');
+  assert.equal(archivedRows().length, 0);
+  assert.equal(textOf(findAll(hasClass('ace-archived-note'))[0]), DICTS.zh.entriesArchivedEmpty, '仍给空态文案');
+});
+
+test('已归档分区：刷新后归档变少时页码被钳位，不停在不存在的页上', async () => {
+  let archivedTotal = 45;
+  const host = makeHost({
+    entries: () => ({
+      ok: true,
+      status: 200,
+      json: async () => entriesPayload([], { archived: makeArchived(archivedTotal), archivedTotal }),
+    }),
+  });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  await click(archivedNext());
+  await click(archivedNext());
+  assert.equal(pagerText(), pageTextFor(3, 3), '先翻到最后一页');
+
+  // 刷新成很短的列表：3 条 → 只有 1 页。
+  archivedTotal = 3;
+  await click(refreshBtn());
+  assert.equal(archivedRows().length, 3, '刷新后只剩 3 条');
+  assert.equal(pagerText(), pageTextFor(1, 1), '钳位到唯一存在的第 1 页');
+  assert.equal(findAll(hasClass('ace-archived-item')).length, 3, '没有渲染出任何越界行');
+  assert.equal(archivedPrev().props.disabled, true, '钳位后上页禁用');
+  assert.equal(archivedNext().props.disabled, true, '钳位后下页禁用');
+  assert.equal(findAll(hasClass('ace-archived-note')).length, 0, '非空归档不显示空态');
+});
+
+test('已归档分区：翻页仍是只读 —— 没有输入控件、没有删除/还原按钮，翻页不发写请求', async () => {
+  const host = makeHost({ entries: archivedPayload(45) });
+  await mount(host);
+  await gotoEntries();
+  await click(scopeButton(DICTS.zh.entriesScopeArchived));
+  await click(archivedNext());
+  await click(archivedNext());
+  await click(pagerButtons().find((node) => textOf(node) === '1'));
+
+  const scoped = [];
+  walk(entriesPage(), (node) => scoped.push(node));
+  assert.equal(scoped.filter((node) => node.type === 'input').length, 0, '归档分区没有输入控件');
+  assert.equal(scoped.filter((node) => hasClass('ace-entries-archive-btn')(node)).length, 0, '归档分区不许出现归档按钮');
+  for (const node of scoped) {
+    if (node.type !== 'button') continue;
+    const text = textOf(node);
+    assert.equal(/删除|移除|还原|恢复|delete|remove|restore|undelete/i.test(text), false, '归档分区不许有删除/还原入口：' + text);
+    assert.equal(text === DICTS.zh.entriesArchiveBtn || text === DICTS.zh.entriesArchiveConfirmBtn,
+      false, '归档分区不许出现「归档 / 确认」按钮：' + text);
+  }
+  // 分页按钮只能是 上一页 / 下一页 / 数字页码。
+  for (const node of pagerButtons()) {
+    const text = textOf(node);
+    assert.ok(text === DICTS.zh.entriesPrev || text === DICTS.zh.entriesNext || /^\d+$/.test(text),
+      '分页按钮只允许 上一页 / 下一页 / 数字页码，实际：' + text);
+  }
+  assert.equal(archiveCalls(host).length, 0, '翻页不发任何写请求');
 });
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REFLECTOR_SYSTEM, candidateLine, extractJsonObject } from '../lib/prompts.js';
+import { REFLECTOR_SYSTEM, candidateLine, extractJsonObject, reflectorUserInput } from '../lib/prompts.js';
 
 // 第 33 轮：REFLECTOR_SYSTEM 整份重写成四段式。
 // 为什么要四段而不是一串编号要求：编号清单一长，模型会按「最容易满足的那条」妥协；
@@ -382,4 +382,15 @@ test('R48-G2b：对象路径遇单引号，报错带 ace: 前缀 + 现场 + 原�
 
 test('R48-G2c：对象路径遇尾逗号，报错带 ace: 前缀 + 现场 + 原始 message', () => {
   assertJsonUnparseable('{"title":"a","condition":"c",}');
+});
+
+test('A2｜reflectorUserInput：第 1 轮带摘要；第 2 轮摘要为空时给明确占位、不再说「手册为空」', () => {
+  const r1 = reflectorUserInput({ summary: '轨迹X', playbookDigest: '[ace-001] T｜条件：C', round: 1 });
+  assert.ok(r1.includes('[ace-001] T｜条件：C'), '第 1 轮带完整摘要');
+  assert.equal(r1.includes('本轮起不再重发手册摘要'), false, '第 1 轮不出现占位');
+  const prior = [{ title: 'A', condition: 'c', action: 'a', rationale: 'r' }];
+  const r2 = reflectorUserInput({ summary: '轨迹X', playbookDigest: '', priorCandidates: prior, round: 2 });
+  assert.ok(r2.includes('本轮起不再重发手册摘要'), '第 2 轮摘要为空时给占位');
+  assert.ok(r2.includes('此前轮次已提炼的候选'), '此前轮次候选段照旧');
+  assert.equal(r2.includes('（手册当前为空）'), false, '第 2 轮不再写「手册当前为空」误导');
 });

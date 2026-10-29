@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reflectRounds, REFLECT_MAX_ROUNDS } from '../lib/reflect.js';
 
-test('C3｜上限是 3 轮（用户拍板的硬上限）', () => {
-  assert.equal(REFLECT_MAX_ROUNDS, 3);
+test('C3｜上限是 2 轮（用户拍板的硬上限）', () => {
+  assert.equal(REFLECT_MAX_ROUNDS, 2);
 });
 
 test('C3｜第 1 轮就返回空数组 → 立刻收敛，只跑 1 轮', async () => {
@@ -27,7 +27,7 @@ test('C3｜第 2 轮返回空数组 → 收敛，候选只来自第 1 轮（不�
   assert.deepEqual(out.candidates, a, '第 1 轮的候选必须保留');
 });
 
-test('C3｜每轮都有新候选 → 跑满 3 轮硬停（converged=false），候选按轮累积', async () => {
+test('C3｜每轮都有新候选 → 跑满默认 2 轮硬停（converged=false），候选按轮累积', async () => {
   const rounds = [];
   const out = await reflectRounds({
     callRound: async (round) => {
@@ -35,10 +35,10 @@ test('C3｜每轮都有新候选 → 跑满 3 轮硬停（converged=false），�
       return [{ title: 'T' + round, condition: 'c', action: 'a', rationale: 'r' }];
     },
   });
-  assert.deepEqual(rounds, [1, 2, 3], '最多 3 轮，不许无限跑');
-  assert.equal(out.rounds, 3);
+  assert.deepEqual(rounds, [1, 2], '默认最多 2 轮，不许无限跑');
+  assert.equal(out.rounds, 2);
   assert.equal(out.converged, false, '没出现空数组就不是「收敛」');
-  assert.deepEqual(out.candidates.map((c) => c.title), ['T1', 'T2', 'T3']);
+  assert.deepEqual(out.candidates.map((c) => c.title), ['T1', 'T2']);
 });
 
 test('C3｜第 2 轮起把此前已提炼的候选原样传进去（供提示词去重）', async () => {
@@ -46,6 +46,7 @@ test('C3｜第 2 轮起把此前已提炼的候选原样传进去（供提示词
   const c1 = { title: 'A', condition: 'c', action: 'a', rationale: 'r' };
   const c2 = { title: 'B', condition: 'c', action: 'a', rationale: 'r' };
   await reflectRounds({
+    maxRounds: 3, // 显式 3 轮：本用例验的是「每轮都拿到此前累积的候选」的语义，与默认轮数无关
     callRound: async (round, prior) => {
       seen.push({ round, prior });
       if (round === 1) return [c1];

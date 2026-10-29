@@ -182,11 +182,14 @@ test('配置行为①：injectTokenBudget 调小 → 注入条数真的变少（
   await writePlaybookFile(file, FIVE());
   const agent = makeAgent();
 
-  const wide = makeHost({ playbookPath: file, config: { injectTokenBudget: 4000, injectMaxEntries: 5 } });
+  // 绝对门槛另有一组专门用例（tests/inject.test.mjs 的 C5.8）；这里钉的是预算，
+  // 5 条同正文的小手册会被门槛整片挡空，所以关掉门槛（0 = 关）。
+  const gateOff = { injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0 };
+  const wide = makeHost({ playbookPath: file, config: { ...gateOff, injectTokenBudget: 4000, injectMaxEntries: 5 } });
   const textWide = await injectFor(wide, agent, QUALITY.title);
   const idsWide = idsOf(textWide);
 
-  const narrow = makeHost({ playbookPath: file, config: { injectTokenBudget: 150, injectMaxEntries: 5 } });
+  const narrow = makeHost({ playbookPath: file, config: { ...gateOff, injectTokenBudget: 150, injectMaxEntries: 5 } });
   const textNarrow = await injectFor(narrow, agent, QUALITY.title);
   const idsNarrow = idsOf(textNarrow);
 
@@ -197,7 +200,7 @@ test('配置行为①：injectTokenBudget 调小 → 注入条数真的变少（
 
   // 纯函数口径复算一次，证明差异确实来自预算这一项（其余入参一字不差）。
   const entries = FIVE();
-  const pick = (budget) => selectInjection(entries, QUALITY.title, { tokenBudget: budget, maxEntries: 5 });
+  const pick = (budget) => selectInjection(entries, QUALITY.title, { ...gateOff, tokenBudget: budget, maxEntries: 5 });
   assert.equal(pick(4000).count, 5);
   assert.equal(pick(150).count, idsNarrow.length, 'HTTP 面看到的条数必须与纯函数口径一致');
 });
@@ -208,19 +211,21 @@ test('配置行为②：injectMaxEntries 调小 → 注入条数真的变少（�
   await writePlaybookFile(file, FIVE());
   const agent = makeAgent();
 
-  const many = makeHost({ playbookPath: file, config: { injectTokenBudget: 4000, injectMaxEntries: 5 } });
+  // 同①：5 条同正文的小手册会被绝对门槛整片挡空，本用例钉的是条数上限，故关门槛。
+  const gateOff = { injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0 };
+  const many = makeHost({ playbookPath: file, config: { ...gateOff, injectTokenBudget: 4000, injectMaxEntries: 5 } });
   const textMany = await injectFor(many, agent, QUALITY.title);
 
-  const few = makeHost({ playbookPath: file, config: { injectTokenBudget: 4000, injectMaxEntries: 2 } });
+  const few = makeHost({ playbookPath: file, config: { ...gateOff, injectTokenBudget: 4000, injectMaxEntries: 2 } });
   const textFew = await injectFor(few, agent, QUALITY.title);
 
   assert.equal(idsOf(textMany).length, 5);
   assert.equal(idsOf(textFew).length, 2, 'injectMaxEntries=2 就必须只注入 2 条：' + JSON.stringify(idsOf(textFew)));
   assert.deepEqual(idsOf(textFew), idsOf(textMany).slice(0, 2), '被砍掉的是尾部，头部顺序不许变');
-  assert.equal(selectInjection(FIVE(), QUALITY.title, { maxEntries: 2 }).count, 2);
+  assert.equal(selectInjection(FIVE(), QUALITY.title, { ...gateOff, maxEntries: 2 }).count, 2);
 
   // 第 37 轮任务 C：首行「最多 N 条」跟配置值走（injectMaxEntries=8 首行必须是「最多 8 条」）
-  const big = makeHost({ playbookPath: file, config: { injectTokenBudget: 4000, injectMaxEntries: 8 } });
+  const big = makeHost({ playbookPath: file, config: { ...gateOff, injectTokenBudget: 4000, injectMaxEntries: 8 } });
   const textBig = await injectFor(big, agent, QUALITY.title);
   assert.ok(/最多 8 条/.test(textBig.split('\n')[0]), 'injectMaxEntries=8 时首行必须写最多 8 条：' + textBig.split('\n')[0]);
   assert.ok(!/最多 5 条/.test(textBig), '配置是 8 就不许还保留默认的 5：' + textBig.split('\n')[0]);

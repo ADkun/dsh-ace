@@ -494,3 +494,19 @@ test('R48-F2 回归｜配平但非法 JSON 的数组送 parseMergeResult 仍是 
   const recovered = extractJsonObjectForTest('[{"title":"a"},{"title":"b"},]');
   assert.deepEqual(recovered.candidates.map((c) => c.title), ['a', 'b'], '回收必须真拿到两条（断言不许是永真）');
 });
+
+test('C1｜mergePairInput 不喂 rationale，删除「合并要求」但仍要求四字段 JSON 输出', () => {
+  const a = makeEntry('ace-001', '批量改名前先列调用点', '当批量重命名符号时', '先用 grep 列出全部调用点');
+  a.rationale = '不该出现在输入里的依据甲';
+  const b = makeEntry('ace-002', '批量重命名要核对调用点', '当批量重命名符号时', '先用 grep 列出全部调用点');
+  b.rationale = '不该出现在输入里的依据乙';
+  const text = mergePairInput(a, b);
+  assert.equal(text.includes('依据：'), false, '不再喂依据行：' + text);
+  assert.equal(text.includes('不该出现在输入里的依据甲'), false, 'rationale 不进输入');
+  assert.equal(text.includes('## 合并要求'), false, '删掉旧的「合并要求」四条');
+  assert.ok(/四字段 JSON 对象/.test(text), '必须保留等价能力的短输出约束');
+  assert.ok(text.includes('ace-001') && text.includes('ace-002'), '两条正文都在');
+  for (const field of ['title', 'condition', 'action', 'rationale']) {
+    assert.ok(text.includes('"'.concat(field).concat('"')), '输出约束仍写明字段：' + field);
+  }
+});

@@ -168,8 +168,9 @@ test('renderTrajectory: 长回合超限后，第一条 user 的任务目标仍�
   const goal = '目标：修好 build 脚本';
   const messages = [msg('user', [text(goal)])];
   for (let i = 0; i < 25; i++) {
-    messages.push(msg('assistant', [text('A'.repeat(480)), { type: 'tool-call', id: 'c' + i, name: 'pwsh', arguments: '{}' }]));
-    messages.push(msg('tool', [text('T'.repeat(390))], { toolCallId: 'c' + i }));
+    // 每条正文各带唯一后缀：A4 会折叠完全相同的行，这里要的是「真超限」，所以每条必须唯一。
+    messages.push(msg('assistant', [text('A'.repeat(470) + '#' + i), { type: 'tool-call', id: 'c' + i, name: 'pwsh', arguments: '{}' }]));
+    messages.push(msg('tool', [text('T'.repeat(380) + '#' + i)], { toolCallId: 'c' + i }));
   }
   messages.push(msg('tool', [text('E'.repeat(390))], { toolCallId: 'c-last', isError: true }));
 
@@ -535,4 +536,22 @@ test('lib/index.js：拆门后不再装配 listAgents，inject 也不再声明 a
   const injectLine = indexSource.split('\n').find((l) => l.startsWith('export const inject'));
   assert.ok(injectLine, '应有 inject 声明');
   assert.ok(!injectLine.includes("'agents'"), 'inject 不许再声明 agents 服务：' + injectLine);
+});
+
+test('A4：完全相同的行只留首次出现（重复行折叠），且不突破 maxChars', () => {
+  const dup = '同一条重复的工具输出';
+  const messages = [
+    msg('user', [text('开始任务')]),
+    msg('assistant', [text(dup)]),
+    msg('assistant', [text(dup)]),
+    msg('assistant', [text(dup)]),
+  ];
+  const full = renderTrajectory(messages, { maxChars: 1000000 });
+  const occurrences = full.text.split('\n').filter((line) => line.includes(dup)).length;
+  assert.equal(occurrences, 1, '三条相同正文折叠成一行：' + JSON.stringify(full.text));
+  assert.equal(full.text.includes('开始任务'), true, '非重复行照常保留');
+  const capped = renderTrajectory(messages, { maxChars: 40 });
+  assert.ok(capped.text.length <= 40, '折叠后仍受 maxChars 约束：' + capped.text.length);
+  const summary = buildRecapSummary({ mutCount: 3, trajectory: full, maxChars: 200 });
+  assert.ok(summary.length <= 200, '整条 summary ≤ maxChars：' + summary.length);
 });

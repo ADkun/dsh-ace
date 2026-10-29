@@ -106,6 +106,10 @@ function makeHost({ playbookPath, config = {} }) {
     autoRecapThreshold: 1,
     autoRecapCooldownTurns: 0,
     autoReviewInbox: false,
+    // 绝对门槛（4.0 × IDF_MAX）另有一组专门用例（tests/inject.test.mjs 的 C5.8）；
+    // 本文件钉的是热度接线，三条条目的小手册夹具会整片被门槛挡空，所以这里关掉（0 = 关）。
+    injectMinScoreIdfRatio: 0,
+    injectMinRelativeToTop: 0,
     ...config,
   });
   return { ctx, record };
@@ -159,13 +163,13 @@ async function injectFor(host, agent, text, tries = 40) {
 }
 
 const idsOf = (text) => [...text.matchAll(/\[(ace-\d+)\]/g)].map((m) => m[1]);
-const heatMapOf = (entries, messages) => computeHeat(entries, messages);
+const heatMapOf = (entries, messages, options = {}) => computeHeat(entries, messages, options);
 
 test.after(() => {
   try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
 });
 
-test('热度接线｜窗口按 agent 隔离，且热度真的改变注入顺序（同一手册，两个 agent 排出两个顺序）', async () => {
+test('注入接线｜已注入集合按 agent 隔离（B3），热度纯函数口径不变', async () => {
   const file = path.join(ROOT, 'per-agent', 'playbook.md');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const entries = fixtureEntries();
@@ -176,32 +180,32 @@ test('热度接线｜窗口按 agent 隔离，且热度真的改变注入顺序�
 
   // 先钉住纯函数的口径：窗口里三条「回滚」消息只捞到 ace-002 → 它的热度最高；
   // 而 ace-001 与 ace-002 对种子话题的相关度几乎相同（002 只多一个词的正文长度差）。
-  const heat = heatMapOf(entries, [WINDOW_TOPIC, WINDOW_TOPIC, WINDOW_TOPIC]);
+  const gateOff = { injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0 };
+  const heat = heatMapOf(entries, [WINDOW_TOPIC, WINDOW_TOPIC, WINDOW_TOPIC], gateOff);
   assert.equal(heat.get('ace-002'), 3, '三条历史消息都命中 ace-002');
   assert.equal(heat.get('ace-001'), undefined, 'ace-001 跟「回滚」没有字面交集');
-  const dry = selectInjection(entries, SEED_TOPIC, { heat });
+  const dry = selectInjection(entries, SEED_TOPIC, { ...gateOff, heat });
   assert.deepEqual(dry.ids, ['ace-002', 'ace-001'], '纯函数口径：热度能把几乎同分的 ace-002 顶到前面');
-  const noHeat = rankInjection(entries, SEED_TOPIC);
+  const noHeat = rankInjection(entries, SEED_TOPIC, gateOff);
   assert.deepEqual(noHeat.ranked.map((r) => r.entry.id), ['ace-001', 'ace-002'], '不看热度时是 id 升序（字面无关的 ace-003 根本不进候选）');
 
-  // agent A：先聊三轮「回滚」（只进窗口，不要求注入出东西），再发种子消息。
-  for (let i = 0; i < 3; i += 1) await injectFor(host, a, WINDOW_TOPIC);
+  // agent A：先聊一轮「回滚」——这条消息会把命中的 ace-002 注入进历史（同时进热度窗口）。
+  const warm = await injectFor(host, a, WINDOW_TOPIC);
+  assert.ok(warm.includes('ace-002'), '暖窗消息自身会注入命中的 ace-002：\n' + warm);
+
+  // 再发种子消息：B3 会话内去重 → ace-002 已注入过，不再重复注入，只剩别的条目。
   const textA = await injectFor(host, a, SEED_TOPIC);
   assert.ok(textA.includes(INJECTION_MARK), 'A 的注入块必须出现：\n' + textA);
   const idsA = idsOf(textA);
-  assert.equal(idsA[0], 'ace-002', 'A 聊了三轮回滚 → ace-002 热度高，必须排第一：' + idsA.join(','));
-  assert.equal(idsA.includes('ace-003'), false, '字面无关的 ace-003 再热也不许进注入块：' + idsA.join(','));
+  assert.equal(idsA.includes('ace-002'), false, 'B3：ace-002 本会话已注入过，种子消息不再重复注入：' + idsA.join(','));
+  assert.ok(idsA.includes('ace-001'), '未注入过的相关条目照常注入：' + idsA.join(','));
+  assert.equal(idsA.includes('ace-003'), false, '字面无关的 ace-003 不许进注入块：' + idsA.join(','));
 
-  // agent B：窗口是空的，同一条种子消息必须排出**旧口径**的顺序（id 升序）。
+  // agent B：全新会话、没注入过任何条目 → 同一条种子消息按旧口径 id 升序两条都注入。
   const textB = await injectFor(host, b, SEED_TOPIC);
   const idsB = idsOf(textB);
-  assert.deepEqual(idsB, ['ace-001', 'ace-002'], 'B 从没聊过回滚，注入顺序必须还是 id 升序：' + idsB.join(','));
-  assert.deepEqual(idsA.slice(0, 2), ['ace-002', 'ace-001'], 'A、B 排出了两个顺序 → 窗口确实按 agent 隔离');
-
-  // B 自己聊过之后也必须按自己的窗口算（不许被 A 的历史带偏）。
-  for (let i = 0; i < 3; i += 1) await injectFor(host, b, WINDOW_TOPIC);
-  const textB2 = await injectFor(host, b, SEED_TOPIC);
-  assert.equal(idsOf(textB2)[0], 'ace-002', 'B 自己聊过回滚之后，排序也必须跟着变：' + idsOf(textB2).join(','));
+  assert.deepEqual(idsB, ['ace-001', 'ace-002'], 'B 没注入过任何条目 → 两条都注入（id 升序）：' + idsB.join(','));
+  assert.notDeepEqual(idsA, idsB, 'A、B 结果不同 → 「已注入集合」确实按 agent 隔离');
 });
 
 test('热度接线｜重启即清空：全新 host（空窗口）对同一条消息排出旧口径顺序', async () => {

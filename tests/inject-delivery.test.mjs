@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createInjectionDelivery, INJECTION_SOURCE_KIND, INJECTION_SOURCE_FORM } from '../lib/inject-delivery.js';
 import { createInjectionFlow } from '../lib/injection-flow.js';
-import { createInjectionCache, selectInjection } from '../lib/inject.js';
+import { createInjectionCache, selectInjection, createInjectedIds } from '../lib/inject.js';
 import { createUsageLedger } from '../lib/ledger.js';
 
 // —— 宿主 createUserMessage 的最小替身（~@deepseek-ai/dsh-llm\lib\index.js:59-64）——
@@ -46,7 +46,9 @@ function rig({ stats, logger, createUserMessage = hostCreateUserMessage, noCreat
     stats: counters,
     logger: logs,
   });
-  const picked = selectInjection(ENTRIES, query, {});
+  // 绝对门槛（4.0 × IDF_MAX）另有一组专门用例（tests/inject.test.mjs 的 C5.8）；
+  // 本文件钉的是投递时序，两条条目的小夹具会整片被门槛挡空，所以这里关掉（0 = 关）。
+  const picked = selectInjection(ENTRIES, query, { injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0 });
   return { cache, ledger, flow, delivery, counters, picked };
 }
 
@@ -83,7 +85,7 @@ test('第28轮 a2｜换一条新消息（新 key）→ 新批次照常投递一�
   const first = await r.delivery.onPreStep({ agent }, async () => decision());
   assert.equal(first.messages.length, 2);
 
-  const picked2 = selectInjection(ENTRIES, '重跑全量测试', {});
+  const picked2 = selectInjection(ENTRIES, '重跑全量测试', { injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0 });
   r.flow.publish(agent, 'id:msg-2', picked2);
   const second = await r.delivery.onPreStep({ agent }, async () => decision());
   assert.equal(second.messages.length, 2, '新批次同样只追加一条');
@@ -265,4 +267,26 @@ test('第45轮③a｜noText 桶：批次的 ids 非空、但注入块正文是�
   assert.equal(stats.appended, 0, '没投递就不许记 appended');
   assert.equal(stats.failed, 0, 'noText 是早退，不是失败（失败走 failures 那块）');
   assert.deepEqual(r.ledger.peek(agent), [], '没追加进历史就不许记账（否则留下幽灵注入）');
+});
+
+test('B3｜投递成功后才把 ids 记进 injectedIds（会话内避免重复注入）', async () => {
+  const cache = createInjectionCache();
+  const ledger = createUsageLedger();
+  const flow = createInjectionFlow({ cache, ledger });
+  const counters = { batches: 0, appended: 0, skipped: 0, failed: 0 };
+  const injectedIds = createInjectedIds();
+  const delivery = createInjectionDelivery({
+    flow,
+    createUserMessage: hostCreateUserMessage,
+    stats: counters,
+    logger: { info() {}, warn() {} },
+    injectedIds,
+  });
+  const agent = mainAgent();
+  const picked = selectInjection(ENTRIES, '先跑一遍基线测试', { injectMinScoreIdfRatio: 0, injectMinRelativeToTop: 0 });
+  assert.equal(injectedIds.has(agent, picked.ids[0]), false, '投递前未记录');
+  flow.publish(agent, 'id:msg-b3', picked);
+  await delivery.onPreStep({ agent }, async () => decision());
+  for (const id of picked.ids) assert.equal(injectedIds.has(agent, id), true, '投递成功后记录：' + id);
+  assert.equal(injectedIds.size(agent), picked.ids.length, '恰好记录这一批');
 });

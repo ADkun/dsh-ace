@@ -170,6 +170,11 @@ function makeHost({ playbookPath, script, config = {}, maxEntries = 100 }) {
     autoRecapThreshold: 1,
     autoRecapCooldownTurns: 0,
     autoReviewInbox: false,
+    // 绝对门槛（4.0 × IDF_MAX）另有一组专门用例（tests/inject.test.mjs 的 C5.8）。
+    // e2e 钉的是整条回合链路（复核/合并/投递/账本），两三行的小手册夹具会被门槛整片挡空，
+    // 所以这里只在本文件关掉门槛（0 = 关）；生产默认仍是 4.0 / 0.6。
+    injectMinScoreIdfRatio: 0,
+    injectMinRelativeToTop: 0,
     ...config,
   });
   return { ctx, record };
@@ -376,16 +381,15 @@ test('E2E 场景1｜mutating 工具结果 → turn-stopping → status idle 真�
 });
 
 // ————————————————————————————————————————————————————————————————
-// 场景 2：多轮复盘 —— 第 1 轮 2 条、第 2 轮 1 条、第 3 轮空数组 → 收敛在第 3 轮、候选共 3 条。
+// 场景 2：多轮复盘 —— 第 1 轮 3 条、第 2 轮空数组 → 收敛在第 2 轮（默认上限 2）、候选共 3 条。
 // ————————————————————————————————————————————————————————————————
-test('E2E 场景2｜多轮复盘在第 3 轮空数组处收敛，候选总数 3 条', async () => {
+test('E2E 场景2｜多轮复盘在第 2 轮空数组处收敛，候选总数 3 条', async () => {
   const file = scenarioDir('e2e-2');
   await writePlaybook(file, []);
   const host = makeHost({
     playbookPath: file,
     script: [
-      [cand('日志按请求号串联', '排查线上问题时', '先按 trace id 把所有日志捞齐'), cand('改配置前先备份', '要动生产配置时', '先导出当前配置快照')],
-      [cand('迁移脚本先在影子库试跑', '要执行数据迁移时', '影子库跑通再上生产')],
+      [cand('日志按请求号串联', '排查线上问题时', '先按 trace id 把所有日志捞齐'), cand('改配置前先备份', '要动生产配置时', '先导出当前配置快照'), cand('迁移脚本先在影子库试跑', '要执行数据迁移时', '影子库跑通再上生产')],
       [],
     ],
   });
@@ -393,11 +397,10 @@ test('E2E 场景2｜多轮复盘在第 3 轮空数组处收敛，候选总数 3 
 
   await runTurn(host, agent, { turn: 2, until: diskHas(file, (p) => ['日志按请求号串联', '改配置前先备份', '迁移脚本先在影子库试跑'].every((t) => hasTitle(t)(p))) });
 
-  assert.equal(host.record.llmCalls.length, 3, '必须正好 3 轮（第 3 轮空数组即收敛，不再多问一轮）');
-  assert.ok(logHas(host, '多轮复盘第 1 轮产出 2 条候选（累计 2 条）'), host.record.logs.info.join(' / '));
-  assert.ok(logHas(host, '多轮复盘第 2 轮产出 1 条候选（累计 3 条）'), host.record.logs.info.join(' / '));
-  assert.ok(logHas(host, '多轮复盘第 3 轮无新增候选，判定收敛（已提炼 3 条）'), host.record.logs.info.join(' / '));
-  assert.ok(logHas(host, '复盘完成 第 1 次（3 轮收敛），本轮候选 3 条，累计候选 3 条'), host.record.logs.info.join(' / '));
+  assert.equal(host.record.llmCalls.length, 2, '必须正好 2 轮（第 2 轮空数组即收敛，不再多问一轮）');
+  assert.ok(logHas(host, '多轮复盘第 1 轮产出 3 条候选（累计 3 条）'), host.record.logs.info.join(' / '));
+  assert.ok(logHas(host, '多轮复盘第 2 轮无新增候选，判定收敛（已提炼 3 条）'), host.record.logs.info.join(' / '));
+  assert.ok(logHas(host, '复盘完成 第 1 次（2 轮收敛），本轮候选 3 条，累计候选 3 条'), host.record.logs.info.join(' / '));
 
   const parsed = readParsed(file);
   assert.equal(parsed.entries.length, 3, '3 条候选都该落盘');
@@ -638,7 +641,7 @@ test('E2E 场景5b｜满额先合并：LLM 合成一条、保留更早那条的 
   assert.equal(archived[0].archive.supersededBy, 'ace-001', '归档行要记明被并进了谁');
 });
 // ————————————————————————————————————————————————————————————————
-// 场景 6：注入契约 —— 追加进历史的那条 user 消息里出现「【ACE 自动注入】」，条数 ≤ 5、token ≤ 900；
+// 场景 6：注入契约 —— 追加进历史的那条 user 消息里出现「【ACE 自动注入】」，条数 ≤ 5（token 预算默认 500，此处不再断言具体 token）；
 //         排序是**纯 BM25 相关度**（同分按 id 数字升序），hits 高低完全不参与排序
 //         （第 33 轮：净分与考察位一起删掉，排序键里不再有任何「历史成绩」项，避免自增强陷阱）。
 // ————————————————————————————————————————————————————————————————

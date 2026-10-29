@@ -194,6 +194,10 @@ function makeHost(initial = {}, stats = statsPayload(), opts = {}) {
     if (url === '/api/dsh-ace/catalog') return json(200, { ok: true, providers: CATALOG });
     if (url === '/api/dsh-ace/stats') return json(200, stats);
     if (url === '/api/dsh-ace/inbox') return json(200, opts.inboxBody || { ok: true, items: [], full: false, cap: 20 });
+    // 思考档位（第 50 轮）：本文件不测它，只给一份最小成功返回，免得假宿主对未知路由抛错。
+    if (String(url).startsWith('/api/dsh-ace/efforts')) {
+      return json(200, { ok: true, efforts: [{ id: 'off', name: '关' }], effective: { effort: null, source: 'none', reason: '不降档' } });
+    }
     if (url === '/api/dsh-ace/settings') {
       if (method === 'POST') Object.assign(settings, JSON.parse(init.body));
       if (method === 'DELETE') Object.assign(settings, DEFAULTS);

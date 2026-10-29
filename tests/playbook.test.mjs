@@ -187,11 +187,16 @@ test('applyOps：同批内两条相同 add —— 第二条记 duplicates', () =
   assert.equal(r.duplicates.length, 1);
 });
 
-test('digestEntries：压缩为一行一条', () => {
+test('digestEntries：压缩为一行一条，只含标题 + 条件（A3：不含做法）', () => {
   const { entries } = parsePlaybook(SAMPLE);
   const d = digestEntries(entries);
   assert.equal(d.length, 2);
   assert.ok(d[0].startsWith('[ace-001] 编辑前先读｜条件：'));
+  for (const line of d) {
+    assert.equal(line.includes('｜做法：'), false, '摘要不再带做法：' + line);
+    assert.equal(line.includes('｜依据：'), false, '摘要不含依据：' + line);
+    assert.equal(line.includes('\n'), false, '一条一行');
+  }
 });
 
 test('withLock：同一路径串行，后写者读到先写者的结果', async () => {
